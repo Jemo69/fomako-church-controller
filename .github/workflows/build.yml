@@ -1,0 +1,49 @@
+name: build
+
+on:
+  push:
+  workflow_dispatch:
+
+jobs:
+  linux:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - run: sudo apt-get update && sudo apt-get install -y libxkbcommon-dev libwayland-dev libxkbcommon-x11-0 mesa-vulkan-drivers
+      - run: cargo build --release
+      - run: mkdir -p dist && cp target/release/fomako-church-controller dist/fomako-church-controller-linux-x64
+      - uses: actions/upload-artifact@v4
+        with:
+          name: linux-x64
+          path: dist/fomako-church-controller-linux-x64
+
+  windows:
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - run: cargo build --release
+      - run: mkdir dist; Copy-Item target/release/fomako-church-controller.exe dist/fomako-church-controller-windows-x64.exe
+      - uses: actions/upload-artifact@v4
+        with:
+          name: windows-x64
+          path: dist/fomako-church-controller-windows-x64.exe
+
+  mac:
+    strategy:
+      matrix:
+        runner: [macos-14, macos-15]
+        # macos-14 = arm64 (M1+), macos-15 = arm64; add macos-13 for x64 if needed
+    runs-on: ${{ matrix.runner }}
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: aarch64-apple-darwin,x86_64-apple-darwin
+      - run: cargo build --release
+      - run: mkdir -p dist && cp target/release/fomako-church-controller dist/fomako-church-controller-mac-$(uname -m)
+      - uses: actions/upload-artifact@v4
+        with:
+          name: mac-${{ matrix.runner }}
+          path: dist/fomako-church-controller-mac-*

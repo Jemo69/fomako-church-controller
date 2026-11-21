@@ -2,13 +2,13 @@
 set -euo pipefail
 cd "$(dirname "$0")/.."
 ./scripts/build-linux.sh
-if command -v x86_64-w64-mingw32-gcc >/dev/null; then
+if cargo zigbuild --help >/dev/null 2>&1; then
   ./scripts/build-windows.sh || echo "windows build failed (see above)"
 else
-  echo "skip windows: mingw not installed (sudo apt install -y mingw-w64)"
+  echo "skip windows: cargo-zigbuild not installed (cargo install cargo-zigbuild + zig)"
 fi
 if [[ "$(uname)" == "Darwin" ]]; then
   ./scripts/build-mac.sh
 else
-  echo "skip mac: run scripts/build-mac.sh on a Mac"
+  echo "skip mac: Mac builds need a Mac (or GitHub Actions). See .github/workflows/build.yml"
 fi

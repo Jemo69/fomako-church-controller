@@ -39,17 +39,22 @@ Scenes: `control image picture cameras help light`.
 
 ## Build (in this directory)
 
+Status:
+- Linux x64: DONE — `dist/fomako-church-controller-linux-x64` (40M) + `.tar.gz`
+- Windows x64: DONE — `dist/fomako-church-controller-windows-x64.exe` (33M, PE32+) + `.zip`, cross-built here via `cargo zigbuild --target x86_64-pc-windows-gnu`
+- Mac: needs a Mac (or GitHub Actions) — cross from Linux fails (no Apple `MacOSX.sdk` / `libobjc.tbd`). Run `scripts/build-mac.sh` on a Mac, or push and use `.github/workflows/build.yml`.
+
 ```sh
 scripts/build-linux.sh    # dist/fomako-church-controller-linux-x64
-scripts/build-windows.sh  # dist/*.exe (x86_64-pc-windows-gnu, needs mingw)
-scripts/build-mac.sh      # run on a Mac: dist/*-mac-*
+scripts/build-windows.sh  # zig cross, no mingw needed
+scripts/build-mac.sh      # run ON a Mac: dist/*-mac-*
 scripts/build-all.sh
 ```
 
 Linux needs: `libxkbcommon-dev libwayland-dev` (+ `libxkbcommon-x11-0 mesa-vulkan-drivers` to run).
 
-Windows cross from Linux needs: `mingw-w64` (`x86_64-w64-mingw32-gcc`) + `rustup target add x86_64-pc-windows-gnu`.
-Mac builds must run on a Mac (`rustup target add x86_64-apple-darwin aarch64-apple-darwin`).
+Windows cross from Linux: `cargo install cargo-zigbuild` + `zig` (already used here) + `rustup target add x86_64-pc-windows-gnu`. Old mingw path also works.
+Mac builds must run on a Mac (`rustup target add x86_64-apple-darwin aarch64-apple-darwin`), or via GitHub Actions (`macos-14`/`macos-15` runners).
 
 Config file `fomako-cameras.json` is created next to the binary on first run.
 
