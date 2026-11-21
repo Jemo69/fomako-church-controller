@@ -5,10 +5,19 @@ edition = "2021"
 description = "FoMaKo PTZ church camera controller - pan/tilt/zoom, presets, image settings, picture edit"
 license = "MIT"
 
+[lib]
+crate-type = ["cdylib", "rlib"]
+
 [dependencies]
 rune = { git = "https://github.com/anomalyco/rune", rev = "4a072bb06d1b410989f444caf0c9095b8596a565" }
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
+
+[target.'cfg(target_arch = "wasm32")'.dependencies]
+wasm-bindgen = "0.2"
+wasm-bindgen-futures = "0.4"
+js-sys = "0.3"
+web-sys = { version = "0.3", features = ["Window", "Location", "Request", "RequestInit", "RequestMode", "Response", "Headers"] }
 
 [patch.crates-io]
 winit = { git = "https://github.com/anomalyco/rune", rev = "4a072bb06d1b410989f444caf0c9095b8596a565" }

@@ -39,6 +39,16 @@ where F: Fn(&mut App) + 'static {
         .child(text(label.to_owned()).font(type_::BODY).color(rune::Color::WHITE).a11y_hidden())
 }
 
+fn accent_btn_tx<F>(label: &str, key: &str, dark: bool, w: f32, h: f32, f: F) -> El
+where F: Fn(&mut App, &mut rune::Tx) + 'static {
+    let a = tok::accent(0, dark);
+    el().key(key.to_owned()).w(w).h(h).center().radius(8.0)
+        .fill(a).hover(a).press(a).focusable(true)
+        .role("button").label(label.to_owned())
+        .on_press_tx(f)
+        .child(text(label.to_owned()).font(type_::BODY).color(rune::Color::WHITE).a11y_hidden())
+}
+
 fn section_title(t: rune::tok::Theme, title: &str) -> El {
     text(title.to_owned()).key(format!("sec-{}", title)).font(type_::SECTION).color(t.text_secondary)
 }
@@ -464,6 +474,8 @@ fn cameras_page(s: &App, t: rune::tok::Theme, dark: bool) -> El {
         .child(text("Cameras — switch, add, remove".to_owned()).font(type_::TITLE).color(t.text))
         .child(text("Stored in fomako-cameras.json next to the app (USB-stick portable). Default: admin/admin. FoMaKo LCD shows the IP.".to_owned()).font(type_::LABEL).color(t.text_secondary))
         .child(camera_list(s, t))
+        .child(scan_section(s, t, dark))
+        .child(relay_section(s, t, dark))
         .child(add_form(s, t, dark))
         .child(stream_help(s, t))
 }
@@ -507,6 +519,80 @@ fn camera_list(s: &App, t: rune::tok::Theme) -> El {
             })));
     }
     c
+}
+
+fn scan_section(s: &App, t: rune::tok::Theme, dark: bool) -> El {
+    let (running, done, total, msg) = match &s.scan {
+        Some(sc) => (sc.running, sc.done, sc.total, sc.message.clone()),
+        None => (false, 0, 254, String::new()),
+    };
+    let mut c = col().key("scan").w_full().gap(8.0)
+        .child(section_title(t, "Find cameras on my network (auto)"))
+        .child(text("Phone/PC and camera must join the same WiFi/LAN. Desktop scans directly; the browser build scans through the relay below. Cameras on another network? Add the IP manually underneath.".to_owned()).w_full().wrap().font(type_::LABEL).color(t.text_secondary))
+        .child(row().w_full().gap(8.0).center_y()
+            .child(text("Subnet:".to_owned()).font(type_::BODY).color(t.text).w(70.0))
+            .child(text_input(&s.scan_prefix, field_style()).single_line().key("subnet-field").w(130.0)
+                .placeholder("192.168.1".to_owned(), t.text_secondary)
+                .on_edit(|s: &mut App| &mut s.scan_prefix))
+            .child(text(".1–254".to_owned()).font(type_::BODY).color(t.text_secondary))
+            .child(accent_btn_tx(if running { "Stop" } else { "Scan network" }, "scan-btn", dark, 140.0, 32.0,
+                move |s: &mut App, tx: &mut rune::Tx| crate::actions::start_scan(s, tx))))
+        .child(text(if running {
+            format!("Scanning… {}/{} — cameras appear below as found.", done, total)
+        } else if msg.is_empty() {
+            "Not scanned yet. Tip: FoMaKo default lives on 192.168.5.x.".to_owned()
+        } else {
+            msg
+        }).w_full().wrap().font(type_::LABEL).color(t.text_secondary));
+    if let Some(sc) = &s.scan {
+        for (i, r) in sc.results.iter().enumerate() {
+            let ip = r.ip.clone();
+            let line = format!("{} — {}", r.ip, r.detail);
+            c = c.child(
+                row().key(format!("found-{}", i)).w_full().h(40.0).px(12.0).gap(10.0).center_y()
+                    .radius(8.0).fill(t.card).border(1.0, t.card_border)
+                    .child(text(line).font(type_::BODY).color(t.text).grow(1.0))
+                    .child(btn("Add", &format!("add-found-{}", i), t, 64.0, 28.0, move |s: &mut App| {
+                        if s.cameras.iter().any(|c| c.ip == ip) {
+                            s.set_status(format!("{} is already saved", ip));
+                            return;
+                        }
+                        let sc = match &s.scan { Some(sc) => sc, None => return };
+                        let found = match sc.results.get(i) { Some(r) => r.clone(), None => return };
+                        let proto = if found.udp52381 {
+                            crate::model::ProtoSer::SonyUdp
+                        } else {
+                            crate::model::ProtoSer::Tcp
+                        };
+                        let addr = (s.cameras.len() as u8 + 1).min(7);
+                        s.cameras.push(crate::model::CameraConfig {
+                            name: format!("Camera {}", found.ip),
+                            ip: found.ip.clone(),
+                            protocol: proto,
+                            address: addr,
+                        });
+                        s.selected = s.cameras.len() - 1;
+                        s.save();
+                        s.set_status(format!("Added {}", found.ip));
+                    }))
+            );
+        }
+    }
+    c
+}
+
+fn relay_section(s: &App, t: rune::tok::Theme, _dark: bool) -> El {
+    col().key("relay").w_full().gap(8.0)
+        .child(section_title(t, "Phone / browser control (LAN relay)"))
+        .child(text("Browsers can't open camera sockets, so the phone build talks to a tiny relay on your LAN PC (python3 scripts/visca-relay.py --serve-web), which forwards to the cameras. Turn it on, paste the relay URL, then Scan / control works from a phone browser.".to_owned()).w_full().wrap().font(type_::LABEL).color(t.text_secondary))
+        .child(row().w_full().gap(8.0).center_y()
+            .child(btn(if s.use_relay { "Relay: ON" } else { "Relay: OFF" }, "relay-toggle", t, 110.0, 30.0, |s: &mut App| {
+                s.use_relay = !s.use_relay;
+                s.set_status(if s.use_relay { "Relay ON — commands go via relay URL".into() } else { "Relay OFF — direct sockets".into() });
+            }))
+            .child(text_input(&s.relay_url, field_style()).single_line().key("relay-field").grow(1.0)
+                .placeholder("http://192.168.1.10:8080".to_owned(), t.text_secondary)
+                .on_edit(|s: &mut App| &mut s.relay_url)))
 }
 
 fn add_form(s: &App, t: rune::tok::Theme, dark: bool) -> El {

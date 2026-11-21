@@ -1,8 +1,11 @@
 //! App model: cameras, pages, image settings, persistence.
 
+use std::sync::{Arc, Mutex};
+
 use rune::TextEdit;
 use serde::{Deserialize, Serialize};
 
+use crate::discover::{FoundCamera, ScanEvent, ScanHandle};
 use crate::visca::Protocol;
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -124,6 +127,35 @@ pub struct App {
     pub pic_sat: i32,
     pub pic_sharp: i32,
     pub preset_sel: u8,
+
+    // network auto-discovery
+    pub scan_prefix: TextEdit,
+    pub scan: Option<ScanState>,
+    // LAN relay for phone/browser builds (see scripts/visca-relay.py)
+    pub relay_url: TextEdit,
+    pub use_relay: bool,
+    /// One-shot: start a scan on first poll (lets a QR link open straight into a scan).
+    pub autostart_scan: bool,
+}
+
+#[derive(Clone, Debug)]
+pub struct ScanResult {
+    pub ip: String,
+    pub detail: String,
+    pub tcp5678: bool,
+    pub udp52381: bool,
+}
+
+pub struct ScanState {
+    pub running: bool,
+    pub via_relay: bool,
+    pub prefix: String,
+    pub done: usize,
+    pub total: usize,
+    pub results: Vec<ScanResult>,
+    pub message: String,
+    pub queue: Arc<Mutex<Vec<ScanEvent>>>,
+    pub handle: Arc<ScanHandle>,
 }
 
 impl App {
@@ -170,6 +202,11 @@ impl App {
             pic_sat: 0,
             pic_sharp: 0,
             preset_sel: 1,
+            scan_prefix: TextEdit::new(crate::discover::detect_prefix()),
+            scan: None,
+            relay_url: TextEdit::new(""),
+            use_relay: false,
+            autostart_scan: false,
         };
         if s.cameras.is_empty() {
             s.cameras.push(CameraConfig::default());
@@ -239,6 +276,103 @@ impl App {
         // 00 Auto, 01 3000K? Actually manual CAM_WB Mode pq=00..0B:
         // From inquiry: 00 Auto, 01 3000K? Let's use direct index.
         self.wb_mode.min(11)
+    }
+
+    /// Drain background scan results; call from AppSpec::poll. True when changed.
+    pub fn scan_poll(&mut self, tx: &mut rune::Tx) -> bool {
+        use std::sync::atomic::Ordering;
+        use std::time::Duration;
+        // Snapshot under the lock, then release before mutating self.
+        let (events, done, total, finished) = match self.scan.as_ref() {
+            Some(scan) if scan.running => {
+                let events = scan
+                    .queue
+                    .lock()
+                    .map(|mut q| std::mem::take(&mut *q))
+                    .unwrap_or_default();
+                let done = scan.handle.checked.load(Ordering::SeqCst);
+                let total = scan.handle.total.load(Ordering::SeqCst);
+                let finished = scan.handle.done.load(Ordering::SeqCst);
+                (events, done, total, finished)
+            }
+            _ => return false,
+        };
+        let mut changed = false;
+        for e in events {
+            match e {
+                ScanEvent::Found(f) => {
+                    self.apply_scan_found(&f);
+                    changed = true;
+                }
+            }
+        }
+        if let Some(scan) = self.scan.as_mut() {
+            if done != scan.done || total != scan.total {
+                scan.done = done;
+                scan.total = total;
+                changed = true;
+            }
+            if finished {
+                scan.running = false;
+                let n = scan.results.len();
+                let prefix = scan.prefix.clone();
+                let via = if scan.via_relay { " via relay" } else { "" };
+                scan.message = if n == 0 {
+                    format!(
+                        "No cameras found on {}.x{} — same WiFi as the camera? FoMaKo default lives on 192.168.5.x; type that prefix above, or add the IP manually below.",
+                        prefix, via
+                    )
+                } else {
+                    format!(
+                        "Found {} camera{} on {}.x{} — tap Add.",
+                        n,
+                        if n == 1 { "" } else { "s" },
+                        prefix, via
+                    )
+                };
+                self.push_log(format!("Scan finished: {} found", n));
+                changed = true;
+            } else {
+                tx.wake_after(Duration::from_millis(150));
+            }
+        }
+        changed
+    }
+
+    #[cfg(test)]
+    pub fn with_test_runtime() -> rune::Runtime<App> {
+        Self::with_test_runtime_sized((1120.0, 720.0))
+    }
+
+    #[cfg(test)]
+    pub fn with_test_runtime_sized(size: (f32, f32)) -> rune::Runtime<App> {
+        let env = rune::Env {
+            system_dark: true,
+            scale: 1.0,
+        };
+        rune::Runtime::new(App::new(), crate::view::view, size, env)
+    }
+
+    /// Merge a discovery hit into the scan results (dedupe by IP).
+    pub fn apply_scan_found(&mut self, f: &FoundCamera) {
+        let Some(scan) = self.scan.as_mut() else {
+            return;
+        };
+        if let Some(r) = scan.results.iter_mut().find(|r| r.ip == f.ip) {
+            r.tcp5678 |= f.tcp5678;
+            r.udp52381 |= f.udp52381;
+            if r.detail.is_empty() || f.onvif {
+                r.detail = f.detail();
+            }
+        } else {
+            scan.results.push(ScanResult {
+                ip: f.ip.clone(),
+                detail: f.detail(),
+                tcp5678: f.tcp5678,
+                udp52381: f.udp52381,
+            });
+        }
+        scan.results.sort_by(|a, b| a.ip.cmp(&b.ip));
     }
 }
 

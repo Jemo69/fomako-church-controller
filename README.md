@@ -13,7 +13,8 @@ Manual: [FoMaKo NDI/SDI/HDMI PTZ User Manual V3.0 (PDF)](https://fomako.net/uplo
 - **Control page**: PTZ pad (↖ ↑ ↗ ← HOME → ↙ ↓ ↘ + STOP), Zoom Tele/Wide + Stop, Focus Near/Far + Auto/Manual/1-Push, Pan/Tilt/Zoom speeds, Power ON/Standby, Presets 0–254 (quick 0–9 grid), multi-camera switcher.
 - **Image page**: every FoMaKo setting from manual §5.2 — Exposure (Full Auto/Manual/Shutter/Iris/Bright), Shutter, Iris, Gain limit, Bright, ExpComp, Backlight, WDR, NR 2D/3D, Flicker, Gamma, Low-light, Aperture/Sharpness, Brightness, Contrast, Saturation (60–200%), WB + R/B Gain, Flip H/V, B/W, etc. Each row sends real VISCA.
 - **Picture Edit**: photo-style Brightness / Contrast / Saturation / Sharpness sliders (-100…+100) with **live simulated preview** (color bars + gray ramp). **Apply to Camera** sends VISCA A1/A2/49/42. This is the “make the picture look like I want” feature.
-- **Cameras page**: add/remove, Select, Test (sends Stop + shows ACK), protocol toggle (Sony VISCA UDP :52381 recommended, or IP-VISCA TCP :5678), saved to `fomako-cameras.json` beside the app (copy to every booth PC). Shows RTSP/RTMP/Web UI URLs for VLC/OBS/vMix.
+- **Cameras page**: **auto-find** (subnet scan: TCP 5678 + UDP 52381 + HTTP sniff + ONVIF discovery, one-tap Add), add/remove, Select, Test (sends Stop + shows ACK), protocol toggle (Sony VISCA UDP :52381 recommended, or IP-VISCA TCP :5678), saved to `fomako-cameras.json` beside the app (copy to every booth PC). Shows RTSP/RTMP/Web UI URLs for VLC/OBS/vMix.
+- **Phones (Android / iPhone)**: open the web build in the phone browser (same WiFi). The LAN relay serves the UI and forwards camera traffic: `python3 scripts/visca-relay.py --port 8080 --serve-web dist/web`, then open `http://<PC-LAN-IP>:8080/#relay=http%3A%2F%2F<PC-LAN-IP>%3A8080&subnet=192.168.1&autostart=scan` (put it in a booth QR code — the app opens with relay ON and scans automatically). Rune has no native Android/iOS targets yet (its roadmap: web → iOS → Android), so the browser + relay is the phone path.
 - **Help page**: 5-minute church setup (wire, lock IP/DHCP OFF, protocol, Sunday preset workflow, picture).
 
 ### Protocols (from manual p1-2)
@@ -33,9 +34,13 @@ cargo run
 cargo run -- --snap shots/control.png --scene control
 cargo run -- --snap shots/image.png --scene image
 cargo run -- --snap shots/picture.png --scene picture
+cargo run -- --snap shots/cameras.png --scene scan
+# network tests (needs no camera; scan_live hits your real LAN):
+cargo test
+cargo test scan_live -- --ignored --nocapture
 ```
 
-Scenes: `control image picture cameras help light`.
+Scenes: `control image picture cameras help light scan`.
 
 ## Build (in this directory)
 
@@ -48,8 +53,13 @@ Status:
 scripts/build-linux.sh    # dist/fomako-church-controller-linux-x64
 scripts/build-windows.sh  # zig cross, no mingw needed
 scripts/build-mac.sh      # run ON a Mac: dist/*-mac-*
+scripts/build-web.sh      # dist/web (phone + desktop browsers)
 scripts/build-all.sh
 ```
+
+Phone flow: on the LAN PC, `python3 scripts/visca-relay.py --port 8080 --serve-web dist/web`
+(no pip packages needed), then open the printed URL + `#relay=...&subnet=...&autostart=scan`
+on the phone. See `dist/web-release/PHONE_SETUP.txt`.
 
 Linux needs: `libxkbcommon-dev libwayland-dev` (+ `libxkbcommon-x11-0 mesa-vulkan-drivers` to run).
 
