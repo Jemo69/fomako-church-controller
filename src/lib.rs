@@ -8,6 +8,8 @@ pub mod actions;
 pub mod discover;
 #[path = "model.rs"]
 pub mod model;
+#[path = "preview.rs"]
+pub mod preview;
 #[path = "view.rs"]
 pub mod view;
 #[path = "visca.rs"]
@@ -45,6 +47,10 @@ fn init_from_url() -> App {
     let hash = web_sys::window()
         .and_then(|w| w.location().hash().ok())
         .unwrap_or_default();
+    // user=/pass= may come after cam=; hold them until the loop ends.
+    let mut pending_user: Option<String> = None;
+    let mut pending_pass: Option<String> = None;
+    let mut pending_cam: Option<String> = None;
     for kv in hash.trim_start_matches('#').split('&') {
         let mut it = kv.splitn(2, '=');
         match (it.next(), it.next()) {
@@ -63,8 +69,36 @@ fn init_from_url() -> App {
             (Some("autostart"), Some("scan")) => {
                 s.autostart_scan = true;
             }
+            (Some("cam"), Some(v)) => {
+                // Booth QR can pre-configure everything, e.g.
+                // #relay=http%3A%2F%2Fpc%3A8080&cam=192.168.5.163&user=admin&pass=secret&subnet=192.168.5&autostart=scan
+                let v = url_decode(v);
+                if crate::discover::prefix_of(&format!("{}.1", v)).is_some()
+                    && !s.cameras.iter().any(|c| c.ip == v)
+                {
+                    pending_cam = Some(v);
+                }
+            }
+            (Some("user"), Some(v)) => {
+                pending_user = Some(url_decode(v));
+            }
+            (Some("pass"), Some(v)) => {
+                pending_pass = Some(url_decode(v));
+            }
             _ => {}
         }
+    }
+    if let Some(ip) = pending_cam {
+        let addr = (s.cameras.len() as u8 + 1).min(7);
+        s.cameras.push(crate::model::CameraConfig {
+            name: format!("Camera {}", ip),
+            ip,
+            protocol: crate::model::ProtoSer::SonyUdp,
+            address: addr,
+            username: pending_user.unwrap_or_else(|| "admin".into()),
+            password: pending_pass.unwrap_or_else(|| "admin".into()),
+        });
+        s.selected = s.cameras.len() - 1;
     }
     s
 }
@@ -81,6 +115,7 @@ pub fn start() {
             ("help", |s: &mut App| s.page = model::Page::Help),
             ("scan", |s: &mut App| s.page = model::Page::Cameras),
         ],
+        setup: Some(setup),
         poll: Some(poll),
         ..rune::AppSpec::new(
             "FoMaKo Church Controller",
@@ -92,11 +127,19 @@ pub fn start() {
 }
 
 #[cfg(target_arch = "wasm32")]
-fn poll(s: &mut App, _clock: f64, tx: &mut rune::Tx) -> bool {
+fn setup(s: &mut App, waker: rune::Waker) {
+    s.preview_cache = Some(rune::ImageCache::new(waker.clone()));
+    s.preview_waker = Some(waker);
+}
+
+#[cfg(target_arch = "wasm32")]
+fn poll(s: &mut App, clock: f64, tx: &mut rune::Tx) -> bool {
     if s.autostart_scan {
         s.autostart_scan = false;
         s.page = model::Page::Cameras;
         actions::start_scan(s, tx);
     }
-    s.scan_poll(tx)
+    let mut changed = s.scan_poll(tx);
+    changed |= preview::poll(s, clock, tx);
+    changed
 }

@@ -7,11 +7,14 @@
 //! through the LAN relay (`scripts/visca-relay.py`, same machine that
 //! serves the web UI): `GET /api/scan?subnet=192.168.1`.
 
+#[cfg(not(target_arch = "wasm32"))]
 use std::net::{TcpStream, UdpSocket};
-use std::sync::{
-    Arc, Mutex,
-    atomic::{AtomicBool, AtomicUsize, Ordering},
-};
+#[cfg(not(target_arch = "wasm32"))]
+use std::sync::{Arc, Mutex};
+use std::sync::atomic::{AtomicBool, AtomicUsize};
+#[cfg(not(target_arch = "wasm32"))]
+use std::sync::atomic::Ordering;
+#[cfg(not(target_arch = "wasm32"))]
 use std::time::Duration;
 
 #[derive(Clone, Debug)]
@@ -59,6 +62,8 @@ pub struct ScanHandle {
 }
 
 /// This machine's LAN address via the connect-without-traffic trick.
+/// Browsers have no sockets: returns None there (subnet comes from the URL hash).
+#[cfg(not(target_arch = "wasm32"))]
 pub fn local_ipv4() -> Option<String> {
     let sock = UdpSocket::bind("0.0.0.0:0").ok()?;
     // No packet is sent; connect() only picks the route's source address.
@@ -68,6 +73,11 @@ pub fn local_ipv4() -> Option<String> {
         return None;
     }
     Some(ip)
+}
+
+#[cfg(target_arch = "wasm32")]
+pub fn local_ipv4() -> Option<String> {
+    None
 }
 
 /// "192.168.1.5" -> "192.168.1". Falls back to the FoMaKo default subnet.
@@ -86,6 +96,7 @@ pub fn detect_prefix() -> String {
         .unwrap_or_else(|| "192.168.5".to_string())
 }
 
+#[cfg(not(target_arch = "wasm32"))]
 fn tcp_open(ip: &str, port: u16, ms: u64) -> bool {
     use std::net::ToSocketAddrs;
     let target = format!("{}:{}", ip, port);
@@ -99,6 +110,7 @@ fn tcp_open(ip: &str, port: u16, ms: u64) -> bool {
     }
 }
 
+#[cfg(not(target_arch = "wasm32"))]
 fn http_hint(ip: &str) -> String {
     use std::io::{Read, Write};
     use std::net::ToSocketAddrs;
@@ -159,6 +171,7 @@ fn http_hint(ip: &str) -> String {
     hint
 }
 
+#[cfg(not(target_arch = "wasm32"))]
 fn visca_udp_ok(ip: &str) -> bool {
     // Sony VISCA-over-IP power inquiry; any reply counts.
     let payload = [0x81u8, 0x09, 0x04, 0x00, 0xFF];
@@ -176,6 +189,7 @@ fn visca_udp_ok(ip: &str) -> bool {
     matches!(sock.recv_from(&mut buf), Ok((n, _)) if n >= 8)
 }
 
+#[cfg(not(target_arch = "wasm32"))]
 fn probe_host(ip: String) -> Option<FoundCamera> {
     let tcp5678 = tcp_open(&ip, 5678, 350);
     let hint = http_hint(&ip);
@@ -198,8 +212,10 @@ fn probe_host(ip: String) -> Option<FoundCamera> {
     }
 }
 
+#[cfg(not(target_arch = "wasm32"))]
 const ONVIF_MCAST: &str = "239.255.255.250:3702";
 
+#[cfg(not(target_arch = "wasm32"))]
 fn onvif_probe_xml() -> String {
     // MessageID only needs to be unique-ish; responders don't validate it.
     let id = std::time::SystemTime::now()
@@ -212,6 +228,7 @@ fn onvif_probe_xml() -> String {
 }
 
 /// Pull `http(s)://A.B.C.D...` hosts out of WS-Discovery responses.
+#[cfg(not(target_arch = "wasm32"))]
 fn extract_ips(text: &str) -> Vec<String> {
     let mut out = vec![];
     let lower = text.to_lowercase();
@@ -234,6 +251,7 @@ fn extract_ips(text: &str) -> Vec<String> {
 }
 
 /// Multicast WS-Discovery probe; pushes Found events for responders.
+#[cfg(not(target_arch = "wasm32"))]
 pub fn onvif_discover(
     queue: &Arc<Mutex<Vec<ScanEvent>>>,
     handle: &Arc<ScanHandle>,
@@ -282,6 +300,7 @@ pub fn onvif_discover(
 
 /// Scan 1..=254 of `prefix` ("192.168.1") + ONVIF multicast.
 /// Runs on the calling thread; call it from a background thread.
+#[cfg(not(target_arch = "wasm32"))]
 pub fn scan_subnet(
     prefix: &str,
     queue: Arc<Mutex<Vec<ScanEvent>>>,
@@ -631,6 +650,74 @@ mod tests {
         rt.pointer_up(x, y);
         rt.frame(1.0 / 60.0);
         assert_eq!(rt.state.page, crate::model::Page::Image);
+    }
+    #[test]
+    fn rtsp_urls() {
+        assert_eq!(
+            crate::preview::rtsp_url("192.168.5.163", 554, "", ""),
+            "rtsp://192.168.5.163:554/live/av0"
+        );
+        assert_eq!(
+            crate::preview::rtsp_url("192.168.5.163", 554, "admin", "admin"),
+            "rtsp://admin:admin@192.168.5.163:554/live/av0"
+        );
+        // '@ : / ? #' must never break the URL structure.
+        assert_eq!(
+            crate::preview::rtsp_url("10.0.0.2", 8554, "ad@min", "p:a/s?s#"),
+            "rtsp://ad%40min:p%3Aa%2Fs%3Fs%23@10.0.0.2:8554/live/av0"
+        );
+        assert_eq!(crate::preview::rtsp_url("10.0.0.2", 554, "admin", ""), "rtsp://admin:@10.0.0.2:554/live/av0");
+    }
+    #[test]
+    fn old_configs_without_login_still_load() {
+        // Configs saved before usernames existed must keep working (defaults admin/admin).
+        let old = r#"[{"name":"Pulpit","ip":"192.168.5.163","protocol":"SonyUdp","address":1}]"#;
+        let cams: Vec<crate::model::CameraConfig> = serde_json::from_str(old).unwrap();
+        assert_eq!(cams[0].username, "admin");
+        assert_eq!(cams[0].password, "admin");
+    }
+    /// 2x2 BMP, 70 bytes, hand-built: exercises cache.load -> size/error/pixels
+    /// without needing ffmpeg or network.
+    fn tiny_bmp() -> Vec<u8> {
+        let mut b = vec![];
+        b.extend_from_slice(b"BM");
+        b.extend_from_slice(&70u32.to_le_bytes()); // file size
+        b.extend_from_slice(&[0u8; 4]);
+        b.extend_from_slice(&54u32.to_le_bytes()); // pixel offset
+        b.extend_from_slice(&40u32.to_le_bytes()); // DIB size
+        b.extend_from_slice(&2i32.to_le_bytes()); // w
+        b.extend_from_slice(&2i32.to_le_bytes()); // h
+        b.extend_from_slice(&1u16.to_le_bytes()); // planes
+        b.extend_from_slice(&24u16.to_le_bytes()); // bpp
+        b.extend_from_slice(&0u32.to_le_bytes()); // no compression
+        b.extend_from_slice(&16u32.to_le_bytes()); // image size
+        b.extend_from_slice(&[0u8; 16]); // ppm + colours
+        // bottom-up BGR, rows padded to 4 bytes: red, green / blue, white
+        b.extend_from_slice(&[0, 0, 255, 0, 0, 255, 0, 0]);
+        b.extend_from_slice(&[255, 0, 0, 0, 255, 255, 255, 0]);
+        b
+    }
+    #[test]
+    fn preview_image_decodes_and_reports_size() {
+        use std::sync::{Arc, Mutex};
+        let wake: rune::Waker = Arc::new(|| {});
+        let cache = rune::ImageCache::new(wake);
+        let img = cache.load(tiny_bmp());
+        // Decode happens on worker threads; poll for it briefly.
+        let mut size = None;
+        for _ in 0..100 {
+            if let Some(e) = img.error() {
+                panic!("decode error: {}", e.0);
+            }
+            size = img.size();
+            if size.is_some() {
+                break;
+            }
+            std::thread::sleep(std::time::Duration::from_millis(50));
+        }
+        assert_eq!(size, Some([2, 2]));
+        // pixels() must hand back a drawable handle once decoded.
+        let _px = img.pixels();
     }
     #[test]
     fn scan_json_parsing() {

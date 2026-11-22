@@ -4,15 +4,24 @@
 mod actions;
 mod discover;
 mod model;
+mod preview;
 mod visca;
 mod view;
 
 use model::App;
 use rune::{AppSpec, Tx};
 
-/// Drain background network-scan results into state; re-arm while scanning.
-fn poll(s: &mut App, _clock: f64, tx: &mut Tx) -> bool {
-    s.scan_poll(tx)
+/// Called once with a waker other threads use when new data arrives.
+fn setup(s: &mut App, waker: rune::Waker) {
+    s.preview_cache = Some(rune::ImageCache::new(waker.clone()));
+    s.preview_waker = Some(waker);
+}
+
+/// Drain background network-scan results + preview frames; re-arm while busy.
+fn poll(s: &mut App, clock: f64, tx: &mut Tx) -> bool {
+    let mut changed = s.scan_poll(tx);
+    changed |= crate::preview::poll(s, clock, tx);
+    changed
 }
 
 fn main() {
@@ -26,6 +35,7 @@ fn main() {
             ("light", |s: &mut App| { s.page = model::Page::Control; s.dark = false; }),
             ("scan", |s: &mut App| s.page = model::Page::Cameras),
         ],
+        setup: Some(setup),
         poll: Some(poll),
         ..AppSpec::new(
             "FoMaKo Church Controller",

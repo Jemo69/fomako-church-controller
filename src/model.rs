@@ -1,6 +1,6 @@
 //! App model: cameras, pages, image settings, persistence.
 
-use std::sync::{Arc, Mutex};
+use std::sync::{Arc, Mutex, atomic::AtomicU64};
 
 use rune::TextEdit;
 use serde::{Deserialize, Serialize};
@@ -32,16 +32,31 @@ impl Page {
     }
 }
 
+fn default_user() -> String {
+    "admin".to_string()
+}
+fn default_address() -> u8 {
+    1
+}
+
 #[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct CameraConfig {
     pub name: String,
     pub ip: String,
+    #[serde(default)]
     pub protocol: ProtoSer,
+    #[serde(default = "default_address")]
     pub address: u8,
+    /// Web/RTSP login (FoMaKo default admin/admin). VISCA itself needs no password.
+    #[serde(default = "default_user")]
+    pub username: String,
+    #[serde(default = "default_user")]
+    pub password: String,
 }
 
-#[derive(Clone, Copy, Debug, Serialize, Deserialize, PartialEq, Eq)]
+#[derive(Clone, Copy, Debug, Serialize, Deserialize, PartialEq, Eq, Default)]
 pub enum ProtoSer {
+    #[default]
     SonyUdp,
     Tcp,
 }
@@ -74,6 +89,8 @@ impl Default for CameraConfig {
             ip: "192.168.5.163".into(),
             protocol: ProtoSer::SonyUdp,
             address: 1,
+            username: default_user(),
+            password: default_user(),
         }
     }
 }
@@ -94,6 +111,8 @@ pub struct App {
     // camera form edits
     pub name_edit: TextEdit,
     pub ip_edit: TextEdit,
+    pub user_edit: TextEdit,
+    pub pass_edit: TextEdit,
 
     // image settings (UI state, applied to camera on demand)
     pub ae_mode: u8, // 0 auto,1 manual,2 shutter,3 iris,4 bright
@@ -135,7 +154,29 @@ pub struct App {
     pub relay_url: TextEdit,
     pub use_relay: bool,
     /// One-shot: start a scan on first poll (lets a QR link open straight into a scan).
+    /// Read on web; kept on desktop for shape parity.
+    #[allow(dead_code)]
     pub autostart_scan: bool,
+    // Live preview (ffmpeg snapshots natively, relay snapshots on web).
+    pub preview_on: bool,
+    pub preview_ip: String,
+    pub preview_user: String,
+    pub preview_pass: String,
+    // Bumped to stop the native ffmpeg thread; web drives fetches from poll instead.
+    #[cfg_attr(target_arch = "wasm32", allow(dead_code))]
+    pub preview_gen: Arc<AtomicU64>,
+    pub preview_slot: Arc<Mutex<Option<crate::preview::PreviewUpdate>>>,
+    pub preview_cache: Option<rune::ImageCache>,
+    pub preview_waker: Option<rune::Waker>,
+    pub preview_image: Option<rune::Image>,
+    pub preview_status: String,
+    pub preview_error: String,
+    pub preview_frames: u64,
+    pub preview_ready: bool,
+    #[cfg(target_arch = "wasm32")]
+    pub preview_fetching: bool,
+    #[cfg(target_arch = "wasm32")]
+    pub preview_next_at: f64,
 }
 
 #[derive(Clone, Debug)]
@@ -173,6 +214,8 @@ impl App {
             log: vec![],
             name_edit: TextEdit::new("New Camera"),
             ip_edit: TextEdit::new("192.168.5.163"),
+            user_edit: TextEdit::new(""),
+            pass_edit: TextEdit::new(""),
             ae_mode: 0,
             shutter: 10,
             iris: 8,
@@ -207,6 +250,23 @@ impl App {
             relay_url: TextEdit::new(""),
             use_relay: false,
             autostart_scan: false,
+            preview_on: true,
+            preview_ip: String::new(),
+            preview_user: String::new(),
+            preview_pass: String::new(),
+            preview_gen: Arc::new(AtomicU64::new(0)),
+            preview_slot: Arc::new(Mutex::new(None)),
+            preview_cache: None,
+            preview_waker: None,
+            preview_image: None,
+            preview_status: "Preview starting…".to_string(),
+            preview_error: String::new(),
+            preview_frames: 0,
+            preview_ready: false,
+            #[cfg(target_arch = "wasm32")]
+            preview_fetching: false,
+            #[cfg(target_arch = "wasm32")]
+            preview_next_at: 0.0,
         };
         if s.cameras.is_empty() {
             s.cameras.push(CameraConfig::default());
@@ -398,12 +458,16 @@ fn load_cameras() -> Vec<CameraConfig> {
             ip: "192.168.5.163".into(),
             protocol: ProtoSer::SonyUdp,
             address: 1,
+            username: default_user(),
+            password: default_user(),
         },
         CameraConfig {
             name: "Wide / Choir".into(),
             ip: "192.168.5.164".into(),
             protocol: ProtoSer::SonyUdp,
             address: 2,
+            username: default_user(),
+            password: default_user(),
         },
     ]
 }

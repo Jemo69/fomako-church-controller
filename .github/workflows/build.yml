@@ -48,6 +48,13 @@ jobs:
           name: mac-${{ matrix.runner }}
           path: dist/fomako-church-controller-mac-*
 
+  test:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - run: cargo test
+
   web:
     # Phone + desktop browsers (Android/iPhone path: pair with scripts/visca-relay.py).
     runs-on: ubuntu-latest

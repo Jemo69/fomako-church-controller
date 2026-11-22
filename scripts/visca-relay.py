@@ -39,7 +39,13 @@ class Handler(BaseHTTPRequestHandler):
     server_version = "FoMaKoRelay/0.1"
 
     def log_message(self, fmt, *a):
-        sys.stderr.write("[%s] %s\n" % (time.strftime("%H:%M:%S"), fmt % a))
+        import re
+
+        msg = fmt % a
+        # Never log passwords (they arrive in /api/snapshot and /visca query/body).
+        msg = re.sub(r'"pass(word)?"\s*:\s*"[^"]*"', '"pass":"***"', msg)
+        msg = re.sub(r"pass=[^&\s]*", "pass=***", msg)
+        sys.stderr.write("[%s] %s\n" % (time.strftime("%H:%M:%S"), msg))
         sys.stderr.flush()
 
     def _json(self, obj, code=200):
@@ -61,6 +67,28 @@ class Handler(BaseHTTPRequestHandler):
             if not valid_prefix(prefix):
                 return self._json({"error": "subnet like 192.168.1"}, 400)
             return self._json({"found": scan_subnet(prefix)})
+        if url.path == "/api/snapshot":
+            q = urllib.parse.parse_qs(url.query)
+            ip = (q.get("ip", [""])[0] or "").strip()
+            user = (q.get("user", [""])[0] or "").strip()
+            pw = (q.get("pass", [""])[0] or "").strip()
+            parts = ip.split(".")
+            if len(parts) != 4 or not all(p.isdigit() and 0 <= int(p) <= 255 for p in parts):
+                return self._json({"error": "ip like 192.168.5.163"}, 400)
+            try:
+                port = int((q.get("port", ["554"])[0] or "554"))
+            except ValueError:
+                port = 554
+            jpg = grab_snapshot(ip, port, user, pw)
+            if jpg is None:
+                return self._json({"error": "snapshot failed (camera offline? ffmpeg missing?)"}, 502)
+            self.send_response(200)
+            self.send_header("Content-Type", "image/jpeg")
+            self.send_header("Content-Length", str(len(jpg)))
+            self.send_header("Cache-Control", "no-store")
+            self.end_headers()
+            self.wfile.write(jpg)
+            return
         # static files for the phone web UI
         web = self.server.web_dir
         if web and (url.path in ("/", "/index.html")):
@@ -127,6 +155,38 @@ class Handler(BaseHTTPRequestHandler):
             return self._json({"ok": True, "msg": msg})
         except Exception as e:
             return self._json({"ok": False, "error": str(e)[:200]}, 502)
+
+
+def _userinfo(user: str, pw: str) -> str:
+    import urllib.parse
+
+    if not user:
+        return ""
+    # Quote everything unsafe; '@' and ':' must never pass through raw.
+    q = lambda s: urllib.parse.quote(s, safe="-_.~!$&'()*+,;=")
+    return f"{q(user)}:{q(pw)}@"
+
+
+def grab_snapshot(ip: str, port: int = 554, user: str = "", pw: str = "", timeout: int = 15):
+    """One JPEG frame from rtsp://[user:pass@]ip:port/live/av0 via ffmpeg. None on failure."""
+    import shutil
+    import subprocess
+
+    if shutil.which("ffmpeg") is None:
+        return None
+    try:
+        p = subprocess.run(
+            ["ffmpeg", "-hide_banner", "-loglevel", "error",
+             "-rtsp_transport", "tcp", "-timeout", "5000000",
+             "-i", f"rtsp://{_userinfo(user, pw)}{ip}:{port}/live/av0",
+             "-skip_frame", "nokey",
+             "-frames:v", "1", "-q:v", "5",
+             "-f", "image2pipe", "-vcodec", "mjpeg", "-"],
+            stdout=subprocess.PIPE, stderr=subprocess.DEVNULL, timeout=timeout,
+        )
+    except Exception:
+        return None
+    return p.stdout if p.returncode == 0 and p.stdout else None
 
 
 def valid_prefix(p: str) -> bool:

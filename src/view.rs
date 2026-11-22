@@ -129,9 +129,36 @@ fn statusbar(s: &App, t: rune::tok::Theme) -> El {
 
 // ---------------------------------------------------------------- control
 
+/// Live camera picture (ffmpeg snapshots, or relay snapshots on web).
+/// Fixed 16:9 box so framing never distorts.
+fn preview_pane(s: &App, t: rune::tok::Theme) -> El {
+    let live = s.preview_image.as_ref().and_then(|img| img.size().map(|_| img));
+    let mut box_el = el().key("preview-box").w(480.0).h(270.0).center().radius(8.0)
+        .fill(t.card).border(1.0, t.card_border);
+    if let Some(img) = live {
+        box_el = box_el.child(
+            el().w_full().h_full().radius(8.0).child(
+                el().key("preview-img").w_full().h_full().pixels(img.pixels())
+            )
+        );
+    }
+    let mut pane = col().key("preview").w_full().gap(6.0)
+        .child(row().w_full().gap(8.0).center_y()
+            .child(section_title(t, "Live preview"))
+            .child(text(s.preview_status.clone()).font(type_::LABEL).color(t.text_secondary).grow(1.0))
+            .child(btn(if s.preview_on { "Pause" } else { "Resume" }, "preview-toggle", t, 80.0, 28.0,
+                |s: &mut App| { s.preview_on = !s.preview_on; })))
+        .child(row().w_full().center().child(box_el));
+    if s.preview_image.is_none() {
+        pane = pane.child(text("Pointing the camera? Presets recall the exact framing — this picture is ~1 frame/sec, just for aiming.".to_owned()).w_full().wrap().font(type_::LABEL).color(t.text_secondary));
+    }
+    pane
+}
+
 fn control_page(s: &App, t: rune::tok::Theme, dark: bool) -> El {
     col().key("control").w_full().px(16.0).py(14.0).gap(14.0)
         .child(camera_switcher(s, t))
+        .child(preview_pane(s, t))
         .child(row().w_full().gap(14.0)
             .child(ptz_pad(t))
             .child(col().gap(10.0).w(300.0)
@@ -361,6 +388,7 @@ fn picture_page(s: &App, t: rune::tok::Theme, dark: bool) -> El {
     col().key("picture").w_full().px(16.0).py(14.0).gap(12.0)
         .child(text("Picture Edit — preview, then Apply to Camera".to_owned()).font(type_::TITLE).color(t.text))
         .child(text("Tune the look like a photo editor. The preview below simulates the change live. Apply sends Brightness/Contrast/Saturation/Sharpness (VISCA A1/A2/49/42) to the selected camera.".to_owned()).w_full().wrap().font(type_::LABEL).color(t.text_secondary))
+        .child(preview_pane(s, t))
         .child(col().w_full().gap(16.0)
             .child(col().w_full().gap(8.0)
                 .child(section_title(t, "Adjust"))
@@ -474,6 +502,7 @@ fn cameras_page(s: &App, t: rune::tok::Theme, dark: bool) -> El {
         .child(text("Cameras — switch, add, remove".to_owned()).font(type_::TITLE).color(t.text))
         .child(text("Stored in fomako-cameras.json next to the app (USB-stick portable). Default: admin/admin. FoMaKo LCD shows the IP.".to_owned()).font(type_::LABEL).color(t.text_secondary))
         .child(camera_list(s, t))
+        .child(creds_section(s, t))
         .child(scan_section(s, t, dark))
         .child(relay_section(s, t, dark))
         .child(add_form(s, t, dark))
@@ -519,6 +548,41 @@ fn camera_list(s: &App, t: rune::tok::Theme) -> El {
             })));
     }
     c
+}
+
+fn creds_section(s: &App, t: rune::tok::Theme) -> El {
+    // Edit box mirrors the selected camera; Save writes it back.
+    let (name, user) = {
+        let c = s.current();
+        (c.name.clone(), c.username.clone())
+    };
+    col().key("creds").w_full().gap(8.0)
+        .child(section_title(t, &format!("Login for {} (RTSP/web; VISCA needs none)", name)))
+        .child(row().w_full().gap(8.0).center_y()
+            .child(text("User:".to_owned()).font(type_::BODY).color(t.text).w(60.0))
+            .child(text_input(&s.user_edit, field_style()).single_line().key("cred-user").w(130.0)
+                .placeholder(user.clone(), t.text_secondary)
+                .on_edit(|s: &mut App| &mut s.user_edit))
+            .child(text("Pass:".to_owned()).font(type_::BODY).color(t.text).w(50.0))
+            .child(text_input(&s.pass_edit, field_style()).single_line().secure().key("cred-pass").w(130.0)
+                .placeholder("••••••".to_owned(), t.text_secondary)
+                .on_edit(|s: &mut App| &mut s.pass_edit))
+            .child(btn("Save login", "cred-save", t, 110.0, 30.0, move |s: &mut App| {
+                let u = s.user_edit.text.trim().to_owned();
+                let p = s.pass_edit.text.trim().to_owned();
+                if let Some(c) = s.cameras.get_mut(s.selected) {
+                    if !u.is_empty() {
+                        c.username = u;
+                    }
+                    if !p.is_empty() {
+                        c.password = p;
+                    }
+                    s.user_edit = rune::TextEdit::new("");
+                    s.pass_edit = rune::TextEdit::new("");
+                    s.save();
+                    s.set_status(format!("Login saved for {}", s.current().name.clone()));
+                }
+            })))
 }
 
 fn scan_section(s: &App, t: rune::tok::Theme, dark: bool) -> El {
@@ -570,6 +634,8 @@ fn scan_section(s: &App, t: rune::tok::Theme, dark: bool) -> El {
                             ip: found.ip.clone(),
                             protocol: proto,
                             address: addr,
+                            username: "admin".into(),
+                            password: "admin".into(),
                         });
                         s.selected = s.cameras.len() - 1;
                         s.save();
@@ -609,13 +675,27 @@ fn add_form(s: &App, t: rune::tok::Theme, dark: bool) -> El {
                 .placeholder("192.168.5.163".to_owned(), t.text_secondary)
                 .on_edit(|s: &mut App| &mut s.ip_edit))
             .child(text("Protocol: tap to toggle (UDP 52381 recommended)".to_owned()).font(type_::LABEL).color(t.text_secondary)))
+        .child(row().w_full().gap(8.0).center_y()
+            .child(text("Login:".to_owned()).font(type_::BODY).color(t.text).w(60.0))
+            .child(text_input(&s.user_edit, field_style()).single_line().key("user-field").w(120.0)
+                .placeholder("admin".to_owned(), t.text_secondary)
+                .on_edit(|s: &mut App| &mut s.user_edit))
+            .child(text(" /".to_owned()).font(type_::BODY).color(t.text_secondary))
+            .child(text_input(&s.pass_edit, field_style()).single_line().secure().key("pass-field").w(120.0)
+                .placeholder("admin".to_owned(), t.text_secondary)
+                .on_edit(|s: &mut App| &mut s.pass_edit))
+            .child(text("(RTSP/web login; VISCA needs none)".to_owned()).font(type_::LABEL).color(t.text_secondary)))
         .child(row().gap(8.0)
             .child(accent_btn("Add Sony UDP :52381", "add-udp", dark, 180.0, 32.0, |s: &mut App| {
                 let name = if s.name_edit.text.trim().is_empty() { "Camera".into() } else { s.name_edit.text.trim().to_owned() };
                 let ip = s.ip_edit.text.trim().to_owned();
                 if ip.is_empty() { s.set_status("Enter an IP first".into()); return; }
                 let addr = (s.cameras.len() as u8 + 1).min(7);
-                s.cameras.push(crate::model::CameraConfig { name, ip, protocol: crate::model::ProtoSer::SonyUdp, address: addr });
+                let username = s.user_edit.text.trim().to_owned();
+                let password = s.pass_edit.text.trim().to_owned();
+                let username = if username.is_empty() { "admin".into() } else { username };
+                let password = if password.is_empty() { "admin".into() } else { password };
+                s.cameras.push(crate::model::CameraConfig { name, ip, protocol: crate::model::ProtoSer::SonyUdp, address: addr, username, password });
                 s.selected = s.cameras.len() - 1;
                 s.save();
                 s.set_status(format!("Added {}", s.current().name.clone()));
@@ -625,7 +705,11 @@ fn add_form(s: &App, t: rune::tok::Theme, dark: bool) -> El {
                 let ip = s.ip_edit.text.trim().to_owned();
                 if ip.is_empty() { s.set_status("Enter an IP first".into()); return; }
                 let addr = (s.cameras.len() as u8 + 1).min(7);
-                s.cameras.push(crate::model::CameraConfig { name, ip, protocol: crate::model::ProtoSer::Tcp, address: addr });
+                let username = s.user_edit.text.trim().to_owned();
+                let password = s.pass_edit.text.trim().to_owned();
+                let username = if username.is_empty() { "admin".into() } else { username };
+                let password = if password.is_empty() { "admin".into() } else { password };
+                s.cameras.push(crate::model::CameraConfig { name, ip, protocol: crate::model::ProtoSer::Tcp, address: addr, username, password });
                 s.selected = s.cameras.len() - 1;
                 s.save();
                 s.set_status(format!("Added {}", s.current().name.clone()));
@@ -640,7 +724,7 @@ fn stream_help(s: &App, t: rune::tok::Theme) -> El {
         .child(text(format!("Main:  rtsp://{}:554/live/av0", ip)).font(type_::MONO_CAPTION).color(t.text))
         .child(text(format!("Sub:   rtsp://{}:554/live/av1", ip)).font(type_::MONO_CAPTION).color(t.text))
         .child(text(format!("RTMP:  rtmp://{}:1935/live/av0", ip)).font(type_::MONO_CAPTION).color(t.text))
-        .child(text(format!("Web UI: http://{}  (admin / admin)", ip)).font(type_::MONO_CAPTION).color(t.text))
+        .child(text(format!("Web UI: http://{}  ({} / {})", ip, s.current().username, "•••")).font(type_::MONO_CAPTION).color(t.text))
         .child(hint_card(t, "Video inside this app is control-only: FoMaKo streams via RTSP/RTMP/SRT/NDI (manual §4.3). Keep VLC open beside the controller, or paste the RTSP into OBS as a Media Source."))
 }
 
