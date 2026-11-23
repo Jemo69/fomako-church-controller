@@ -652,6 +652,38 @@ mod tests {
         assert_eq!(rt.state.page, crate::model::Page::Image);
     }
     #[test]
+    fn ffmpeg_search_covers_env_path_and_exe_dir() {
+        // $FFMPEG_BIN always wins, even for a path that doesn't exist.
+        let old_bin = std::env::var_os("FFMPEG_BIN");
+        std::env::set_var("FFMPEG_BIN", "/tmp/does-not-exist-ffmpeg");
+        let cands = crate::preview::ffmpeg_candidates();
+        assert!(!cands.is_empty());
+        assert_eq!(
+            cands[0].to_string_lossy().as_ref(),
+            "/tmp/does-not-exist-ffmpeg"
+        );
+        match old_bin {
+            Some(v) => std::env::set_var("FFMPEG_BIN", v),
+            None => std::env::remove_var("FFMPEG_BIN"),
+        }
+        // The app's own folder is always searched (bundled ffmpeg next to the exe).
+        let exe_dir = std::env::current_exe()
+            .ok()
+            .and_then(|p| p.parent().map(|d| d.to_path_buf()));
+        let cands = crate::preview::ffmpeg_candidates();
+        if let Some(dir) = exe_dir {
+            #[cfg(target_os = "windows")]
+            let want = dir.join("ffmpeg.exe");
+            #[cfg(not(target_os = "windows"))]
+            let want = dir.join("ffmpeg");
+            assert!(
+                cands.contains(&want),
+                "exe dir must be searched: {:?}",
+                want
+            );
+        }
+    }
+    #[test]
     fn rtsp_urls() {
         assert_eq!(
             crate::preview::rtsp_url("192.168.5.163", 554, "", ""),

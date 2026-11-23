@@ -731,9 +731,14 @@ fn stream_help(s: &App, t: rune::tok::Theme) -> El {
 // ---------------------------------------------------------------- help
 
 fn help_page(s: &App, t: rune::tok::Theme, _dark: bool) -> El {
-    let _ = s;
+    let ffmpeg_line = if s.ffmpeg_path.is_empty() {
+        "ffmpeg: NOT FOUND — install it (apt install ffmpeg / brew install ffmpeg / winget install ffmpeg), drop ffmpeg(.exe) next to the app, or point FFMPEG_BIN at it. No preview until then.".to_string()
+    } else {
+        format!("ffmpeg: found at {} — preview should work.", s.ffmpeg_path)
+    };
     col().key("help").w_full().px(16.0).py(14.0).gap(10.0)
         .child(text("Help — church setup in 5 minutes".to_owned()).font(type_::TITLE).color(t.text))
+        .child(help_card(t, "0. Live picture", &format!("The Control page shows a ~1 frame/sec preview grabbed with ffmpeg from rtsp://camera:554/live/av0. {ffmpeg_line}")))
         .child(help_card(t, "1. Wire it",
             "HDMI → TV to see menus (press MENU on the IR remote). LAN → same router/switch as this PC. Power on: camera sweeps left, zooms far→near, then returns to Preset 0 if saved. LCD shows its IP (default 192.168.5.163 if no DHCP)."))
         .child(help_card(t, "2. Lock the IP",

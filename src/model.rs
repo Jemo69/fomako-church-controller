@@ -173,6 +173,9 @@ pub struct App {
     pub preview_error: String,
     pub preview_frames: u64,
     pub preview_ready: bool,
+    /// Resolved once at startup for the Help page; the fetcher re-resolves
+    /// every grab so a later install is picked up without a restart.
+    pub ffmpeg_path: String,
     #[cfg(target_arch = "wasm32")]
     pub preview_fetching: bool,
     #[cfg(target_arch = "wasm32")]
@@ -263,6 +266,7 @@ impl App {
             preview_error: String::new(),
             preview_frames: 0,
             preview_ready: false,
+            ffmpeg_path: crate::preview::ffmpeg_path_or_empty(),
             #[cfg(target_arch = "wasm32")]
             preview_fetching: false,
             #[cfg(target_arch = "wasm32")]

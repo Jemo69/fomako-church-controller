@@ -21,9 +21,91 @@ pub enum PreviewUpdate {
     Error { seq: u64, msg: String },
 }
 
-/// Where ffmpeg lives: PATH first, then next to the app binary (church-PC friendly).
+/// Everywhere we look for ffmpeg, in order. Church booth PCs are rarely on PATH,
+/// so: $FFMPEG_BIN, PATH, next to the app binary, then the usual per-OS spots.
+#[cfg(not(target_arch = "wasm32"))]
+pub fn ffmpeg_candidates() -> Vec<std::path::PathBuf> {
+    use std::path::PathBuf;
+    let mut out: Vec<PathBuf> = vec![];
+    if let Some(v) = std::env::var_os("FFMPEG_BIN") {
+        let p = PathBuf::from(v);
+        if !p.as_os_str().is_empty() {
+            out.push(p);
+        }
+    }
+    if let Some(paths) = std::env::var_os("PATH") {
+        for dir in std::env::split_paths(&paths) {
+            if dir.as_os_str().is_empty() {
+                continue;
+            }
+            #[cfg(target_os = "windows")]
+            out.push(dir.join("ffmpeg.exe"));
+            #[cfg(not(target_os = "windows"))]
+            out.push(dir.join("ffmpeg"));
+        }
+    }
+    if let Ok(exe) = std::env::current_exe() {
+        if let Some(dir) = exe.parent() {
+            #[cfg(target_os = "windows")]
+            out.push(dir.join("ffmpeg.exe"));
+            #[cfg(not(target_os = "windows"))]
+            out.push(dir.join("ffmpeg"));
+        }
+    }
+    #[cfg(target_os = "windows")]
+    for fixed in [
+        "C:\\ffmpeg\\bin\\ffmpeg.exe",
+        "C:\\Program Files\\ffmpeg\\bin\\ffmpeg.exe",
+    ] {
+        out.push(PathBuf::from(fixed));
+    }
+    #[cfg(target_os = "windows")]
+    if let Some(local) = std::env::var_os("LOCALAPPDATA") {
+        let mut p = PathBuf::from(local);
+        p.push("ffmpeg\\bin\\ffmpeg.exe");
+        out.push(p);
+    }
+    #[cfg(target_os = "macos")]
+    for fixed in ["/opt/homebrew/bin/ffmpeg", "/usr/local/bin/ffmpeg"] {
+        out.push(PathBuf::from(fixed));
+    }
+    #[cfg(target_os = "linux")]
+    for fixed in [
+        "/usr/bin/ffmpeg",
+        "/usr/local/bin/ffmpeg",
+        "/snap/bin/ffmpeg",
+    ] {
+        out.push(PathBuf::from(fixed));
+    }
+    out
+}
+
+/// First ffmpeg candidate that exists and runs, if any.
+#[cfg(not(target_arch = "wasm32"))]
+fn ffmpeg_validated() -> Option<String> {
+    for cand in ffmpeg_candidates() {
+        let s = cand.to_string_lossy().into_owned();
+        if cand.is_file()
+            && std::process::Command::new(&cand)
+                .arg("-version")
+                .output()
+                .is_ok()
+        {
+            return Some(s);
+        }
+    }
+    None
+}
+
+/// Best ffmpeg binary path, or the plain name (so error messages still tell
+/// the user what to install). Re-resolved on every grab: installing ffmpeg
+/// mid-session just starts working.
 #[cfg(not(target_arch = "wasm32"))]
 pub fn ffmpeg_bin() -> String {
+    if let Some(p) = ffmpeg_validated() {
+        return p;
+    }
+    // Last resort: hope PATH resolves at spawn time (covers wrappers/shims).
     if std::process::Command::new("ffmpeg")
         .arg("-version")
         .output()
@@ -31,18 +113,20 @@ pub fn ffmpeg_bin() -> String {
     {
         return "ffmpeg".to_string();
     }
-    if let Ok(exe) = std::env::current_exe() {
-        if let Some(dir) = exe.parent() {
-            #[cfg(target_os = "windows")]
-            let cand = dir.join("ffmpeg.exe");
-            #[cfg(not(target_os = "windows"))]
-            let cand = dir.join("ffmpeg");
-            if cand.is_file() {
-                return cand.to_string_lossy().into_owned();
-            }
-        }
-    }
     "ffmpeg".to_string()
+}
+
+/// Validated ffmpeg path for display (Help page), or empty when absent.
+/// The fetcher itself uses [`ffmpeg_bin`], so it never goes stale.
+#[cfg(not(target_arch = "wasm32"))]
+pub fn ffmpeg_path_or_empty() -> String {
+    ffmpeg_validated().unwrap_or_default()
+}
+
+#[cfg(target_arch = "wasm32")]
+pub fn ffmpeg_path_or_empty() -> String {
+    // Browsers can't run ffmpeg; the relay does (see its /api/snapshot).
+    String::new()
 }
 
 /// RTSP port (554), overridable for remapped/NVR setups: `FOMAKO_RTSP_PORT=8554`.

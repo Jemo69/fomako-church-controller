@@ -50,10 +50,13 @@ Scenes: `control image picture cameras help light scan`.
 
 ## Build (in this directory)
 
-Status:
-- Linux x64: DONE — `dist/fomako-church-controller-linux-x64` (40M) + `.tar.gz`
-- Windows x64: DONE — `dist/fomako-church-controller-windows-x64.exe` (33M, PE32+) + `.zip`, cross-built here via `cargo zigbuild --target x86_64-pc-windows-gnu`
+Status (v0.3.0):
+- Linux x64: `dist/fomako-church-controller-linux-x64` + `.tar.gz` (app + static ffmpeg bundled — unzip and run, no install)
+- Windows x64: `dist/fomako-church-controller-windows-x64.exe` + `.zip` (app + `ffmpeg.exe` bundled), cross-built here via `cargo zigbuild --target x86_64-pc-windows-gnu`
+- Web / phones: `dist/fomako-church-controller-web.zip` (UI + relay + setup sheet)
 - Mac: needs a Mac (or GitHub Actions) — cross from Linux fails (no Apple `MacOSX.sdk` / `libobjc.tbd`). Run `scripts/build-mac.sh` on a Mac, or push and use `.github/workflows/build.yml`.
+
+`scripts/fetch-ffmpeg.sh [dest]` drops a static ffmpeg next to the app anywhere (used for the bundled zips). The app itself finds ffmpeg via `$FFMPEG_BIN`, `PATH`, its own folder, then per-OS install spots — see Help → "0. Live picture" for what it resolved to on your machine.
 
 ```sh
 scripts/build-linux.sh    # dist/fomako-church-controller-linux-x64
