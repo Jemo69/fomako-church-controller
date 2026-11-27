@@ -19,8 +19,12 @@ Everything else serves static files from --serve-web (or index text).
 import argparse
 import concurrent.futures as futures
 import json
+import os
+import shutil
 import socket
+import ssl
 import struct
+import subprocess
 import sys
 import time
 import urllib.parse
@@ -322,10 +326,50 @@ def scan_subnet(prefix: str):
     return sorted(found.values(), key=lambda c: [int(x) for x in c["ip"].split(".")])
 
 
+def detect_lan_ip() -> str:
+    try:
+        s = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
+        s.connect(("8.8.8.8", 80))
+        ip = s.getsockname()[0]
+        s.close()
+        if ip and not ip.startswith("127."):
+            return ip
+    except OSError:
+        pass
+    return "127.0.0.1"
+
+
+def ensure_self_signed_cert(lan_ip: str):
+    cache_dir = Path.home() / ".cache" / "fomako-relay"
+    cache_dir.mkdir(parents=True, exist_ok=True)
+    cert = cache_dir / f"cert-{lan_ip}.pem"
+    key = cache_dir / f"key-{lan_ip}.pem"
+    if cert.is_file() and key.is_file():
+        return cert, key
+    if shutil.which("openssl") is None:
+        raise RuntimeError("--https needs openssl on PATH (or pass --cert and --key)")
+    san = f"subjectAltName=DNS:localhost,IP:127.0.0.1,IP:{lan_ip}"
+    subprocess.run(
+        [
+            "openssl", "req", "-x509", "-newkey", "rsa:2048", "-nodes",
+            "-keyout", str(key), "-out", str(cert),
+            "-days", "365", "-subj", f"/CN={lan_ip}",
+            "-addext", san,
+        ],
+        check=True,
+        stdout=subprocess.DEVNULL,
+        stderr=subprocess.DEVNULL,
+    )
+    return cert, key
+
+
 def main():
     ap = argparse.ArgumentParser()
     ap.add_argument("--port", type=int, default=8080)
     ap.add_argument("--serve-web", default="")
+    ap.add_argument("--https", action="store_true", help="Serve over HTTPS (required by Android Chrome WebGPU on LAN IPs)")
+    ap.add_argument("--cert", default="", help="TLS certificate PEM path (implies --https)")
+    ap.add_argument("--key", default="", help="TLS private key PEM path")
     args = ap.parse_args()
 
     class Server(ThreadingHTTPServer):
@@ -333,8 +377,24 @@ def main():
 
     srv = Server(("0.0.0.0", args.port), Handler)
     srv.web_dir = Path(args.serve_web) if args.serve_web else None
-    print(f"relay on :{args.port}  web={srv.web_dir or '(api only)'}")
-    print("phone -> http://<this-PC-IP>:%d   (relay URL identical)" % args.port)
+    lan_ip = detect_lan_ip()
+    scheme = "http"
+    if args.https or args.cert:
+        if args.cert and args.key:
+            cert, key = Path(args.cert), Path(args.key)
+        else:
+            cert, key = ensure_self_signed_cert(lan_ip)
+        ctx = ssl.SSLContext(ssl.PROTOCOL_TLS_SERVER)
+        ctx.load_cert_chain(certfile=str(cert), keyfile=str(key))
+        srv.socket = ctx.wrap_socket(srv.socket, server_side=True)
+        scheme = "https"
+
+    relay_enc = urllib.parse.quote(f"{scheme}://{lan_ip}:{args.port}", safe="")
+    subnet = ".".join(lan_ip.split(".")[:3])
+    print(f"relay on :{args.port} ({scheme})  web={srv.web_dir or '(api only)'}")
+    print(f"phone -> {scheme}://{lan_ip}:{args.port}/#relay={relay_enc}&subnet={subnet}&autostart=scan")
+    if scheme == "https":
+        print("note: first visit on Android Chrome will show a self-signed cert prompt (Advanced -> Proceed).")
     try:
         srv.serve_forever()
     except KeyboardInterrupt:

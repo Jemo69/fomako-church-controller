@@ -1,3 +1,9 @@
 target/
 dist/
 fomako-cameras.json
+android/.gradle/
+android/.kotlin/
+android/local.properties
+android/build/
+android/app/build/
+android/app/src/main/jniLibs/

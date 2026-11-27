@@ -1,0 +1,3 @@
+<resources>
+    <style name="Theme.FoMaKoController" parent="android:Theme.Material.NoActionBar" />
+</resources>
