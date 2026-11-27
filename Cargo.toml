@@ -1,6 +1,6 @@
 [package]
 name = "fomako-church-controller"
-version = "0.1.0"
+version = "0.4.0"
 edition = "2021"
 description = "FoMaKo PTZ church camera controller - pan/tilt/zoom, presets, image settings, picture edit"
 license = "MIT"

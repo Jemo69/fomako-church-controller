@@ -51,7 +51,7 @@ Scenes: `control image picture cameras help light scan`.
 
 ## Build (in this directory)
 
-Status (v0.3.0):
+Status (v0.4.0):
 - Linux x64: `dist/fomako-church-controller-linux-x64` + `.tar.gz` (app + static ffmpeg bundled — unzip and run, no install)
 - Windows x64: `dist/fomako-church-controller-windows-x64.exe` + `.zip` (app + `ffmpeg.exe` bundled), cross-built here via `cargo zigbuild --target x86_64-pc-windows-gnu`
 - Android: `dist/fomako-church-controller-android.apk` (standalone APK with Rust JNI VISCA/discovery core — direct WiFi control + RTSP preview, no PC needed)
@@ -79,6 +79,10 @@ Windows cross from Linux: `cargo install cargo-zigbuild` + `zig` (already used h
 Mac builds must run on a Mac (`rustup target add x86_64-apple-darwin aarch64-apple-darwin`), or via GitHub Actions (`macos-14`/`macos-15` runners).
 
 Config file `fomako-cameras.json` is created next to the binary on first run.
+
+### Every platform, portable
+
+All five builds are portable: nothing is installed, no admin rights, no registry entries. Unzip to any folder — including a USB stick or external hard drive — and run it from there; `fomako-cameras.json` and the bundled ffmpeg travel with the folder, so the same drive works on any booth PC. Android is a plain sideloadable APK. If any platform behaves worse than the others on your machine (GPU rendering, preview, discovery), open an issue with the OS and GPU driver — parity across Linux / Windows / macOS / Android is the goal, and reports are what make it happen.
 
 ## Sunday workflow
 
