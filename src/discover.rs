@@ -652,6 +652,24 @@ mod tests {
         assert_eq!(rt.state.page, crate::model::Page::Image);
     }
     #[test]
+    fn narrow_and_short_viewports_keep_controls_within_bounds() {
+        for (w, h) in [(320.0, 540.0), (640.0, 340.0)] {
+            let mut rt = crate::model::App::with_test_runtime_sized((w, h));
+            for page in crate::model::Page::all() {
+                rt.update(|s, _| s.page = page);
+                rt.frame(0.0);
+                let (tx, ty) = rt.find("theme").expect("theme button present");
+                assert!(tx <= w, "theme button overflowed {w}x{h}: x={tx}");
+                assert!(ty <= h, "theme button outside height {w}x{h}: y={ty}");
+                if page == crate::model::Page::Control {
+                    let (px, _) = rt.find("pt-ne").expect("pt-ne present");
+                    let (sx, _) = rt.find("pt-stop").expect("pt-stop present");
+                    assert!(px <= w && sx <= w, "PTZ overflowed {w}: px={px}, sx={sx}");
+                }
+            }
+        }
+    }
+    #[test]
     fn ffmpeg_search_covers_env_path_and_exe_dir() {
         // $FFMPEG_BIN always wins, even for a path that doesn't exist.
         let old_bin = std::env::var_os("FFMPEG_BIN");

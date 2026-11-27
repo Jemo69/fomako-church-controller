@@ -14,7 +14,8 @@ Manual: [FoMaKo NDI/SDI/HDMI PTZ User Manual V3.0 (PDF)](https://fomako.net/uplo
 - **Image page**: every FoMaKo setting from manual §5.2 — Exposure (Full Auto/Manual/Shutter/Iris/Bright), Shutter, Iris, Gain limit, Bright, ExpComp, Backlight, WDR, NR 2D/3D, Flicker, Gamma, Low-light, Aperture/Sharpness, Brightness, Contrast, Saturation (60–200%), WB + R/B Gain, Flip H/V, B/W, etc. Each row sends real VISCA.
 - **Picture Edit**: photo-style Brightness / Contrast / Saturation / Sharpness sliders (-100…+100) with **live simulated preview** (color bars + gray ramp). **Apply to Camera** sends VISCA A1/A2/49/42. This is the “make the picture look like I want” feature.
 - **Cameras page**: **auto-find** (subnet scan: TCP 5678 + UDP 52381 + HTTP sniff + ONVIF discovery, one-tap Add), add/remove, Select, Test (sends Stop + shows ACK), protocol toggle (Sony VISCA UDP :52381 recommended, or IP-VISCA TCP :5678), **per-camera login** (RTSP/web use it; VISCA needs none), saved to `fomako-cameras.json` beside the app (copy to every booth PC). Shows RTSP/RTMP/Web UI URLs for VLC/OBS/vMix.
-- **Phones (Android / iPhone)**: open the web build in the phone browser (same WiFi). The LAN relay serves the UI and forwards camera traffic: `python3 scripts/visca-relay.py --port 8080 --serve-web dist/web`, then open `http://<PC-LAN-IP>:8080/#relay=http%3A%2F%2F<PC-LAN-IP>%3A8080&subnet=192.168.1&autostart=scan` (put it in a booth QR code — the app opens with relay ON and scans automatically). Rune has no native Android/iOS targets yet (its roadmap: web → iOS → Android), so the browser + relay is the phone path.
+- **Android (Native APK — recommended for Android)**: standalone Jetpack Compose app (`android/`) powered by the Rust VISCA & LAN discovery engine via JNI (`src/android_jni.rs`). Connects **directly** over WiFi to FoMaKo cameras (Sony VISCA UDP `:52381`, IP-VISCA TCP `:5678`, ONVIF + subnet scan, direct RTSP live preview) with **no PC or relay needed** (optional relay toggle included). Build with `scripts/build-android.sh` → `dist/fomako-church-controller-android.apk`.
+- **Phones (iPhone / Android browser)**: open the web build in the phone browser (same WiFi). Because Android Chrome requires HTTPS for WebGPU on LAN IPs, pass `--https` to the LAN relay: `python3 scripts/visca-relay.py --port 8443 --https --serve-web dist/web`, then open the printed `https://<PC-LAN-IP>:8443/#relay=...&subnet=...&autostart=scan` URL (accept the self-signed cert prompt once; put the URL in a booth QR code). Rune has no native Android/iOS backend yet (`web → iOS → Android`), so the native Android app uses Jetpack Compose + Rust JNI while iOS uses the browser + relay path.
 - **Help page**: 5-minute church setup (wire, lock IP/DHCP OFF, protocol, Sunday preset workflow, picture).
 
 ### Protocols (from manual p1-2)
@@ -53,6 +54,7 @@ Scenes: `control image picture cameras help light scan`.
 Status (v0.3.0):
 - Linux x64: `dist/fomako-church-controller-linux-x64` + `.tar.gz` (app + static ffmpeg bundled — unzip and run, no install)
 - Windows x64: `dist/fomako-church-controller-windows-x64.exe` + `.zip` (app + `ffmpeg.exe` bundled), cross-built here via `cargo zigbuild --target x86_64-pc-windows-gnu`
+- Android: `dist/fomako-church-controller-android.apk` (standalone APK with Rust JNI VISCA/discovery core — direct WiFi control + RTSP preview, no PC needed)
 - Web / phones: `dist/fomako-church-controller-web.zip` (UI + relay + setup sheet)
 - Mac: needs a Mac (or GitHub Actions) — cross from Linux fails (no Apple `MacOSX.sdk` / `libobjc.tbd`). Run `scripts/build-mac.sh` on a Mac, or push and use `.github/workflows/build.yml`.
 
@@ -62,6 +64,7 @@ Status (v0.3.0):
 scripts/build-linux.sh    # dist/fomako-church-controller-linux-x64
 scripts/build-windows.sh  # zig cross, no mingw needed
 scripts/build-mac.sh      # run ON a Mac: dist/*-mac-*
+scripts/build-android.sh  # dist/fomako-church-controller-android.apk
 scripts/build-web.sh      # dist/web (phone + desktop browsers)
 scripts/build-all.sh
 ```

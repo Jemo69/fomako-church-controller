@@ -1,15 +1,23 @@
-//! Wasm entrypoint for the browser build (phone + desktop browsers).
-//! Same views as the native app; camera traffic goes through the LAN
-//! relay (`scripts/visca-relay.py`), since browsers can't open raw sockets.
+//! Shared library crate:
+//! - On `wasm32`: browser entrypoint for phones + desktops (`scripts/visca-relay.py`).
+//! - On `android`: native JNI bridge (`src/android_jni.rs`) exposing VISCA + LAN discovery to the Android APK.
+//! - On desktop: shared modules (`rlib`) for tests and helpers.
 
+#[cfg(not(target_os = "android"))]
 #[path = "actions.rs"]
 pub mod actions;
+#[cfg(target_os = "android")]
+#[path = "android_jni.rs"]
+pub mod android_jni;
 #[path = "discover.rs"]
 pub mod discover;
+#[cfg(not(target_os = "android"))]
 #[path = "model.rs"]
 pub mod model;
+#[cfg(not(target_os = "android"))]
 #[path = "preview.rs"]
 pub mod preview;
+#[cfg(not(target_os = "android"))]
 #[path = "view.rs"]
 pub mod view;
 #[path = "visca.rs"]
