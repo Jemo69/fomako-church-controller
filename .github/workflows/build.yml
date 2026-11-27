@@ -58,6 +58,7 @@ jobs:
     steps:
       - uses: actions/checkout@v4
       - uses: dtolnay/rust-toolchain@stable
+      - run: sudo apt-get update && sudo apt-get install -y libxkbcommon-dev libwayland-dev libxkbcommon-x11-0 mesa-vulkan-drivers
       - run: cargo test
 
   web:
@@ -71,6 +72,7 @@ jobs:
       - run: |
           VER="$(grep -A2 'name = "wasm-bindgen"' Cargo.lock | head -n 3 | grep version | head -n 1 | cut -d'"' -f2)"
           cargo install wasm-bindgen-cli --version "$VER" --locked
+      - run: cargo fetch --target wasm32-unknown-unknown
       - run: ./scripts/build-web.sh dist/web
       - run: mkdir -p dist/web-release && cp -r dist/web/* dist/web-release/ && cp scripts/visca-relay.py dist/web-release/ && cd dist && zip -r -q fomako-church-controller-web.zip web-release
       - uses: actions/upload-artifact@v4

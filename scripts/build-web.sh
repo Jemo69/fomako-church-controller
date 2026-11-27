@@ -9,6 +9,11 @@ if [ ! -x "$RUNE_WEB_BUILD" ]; then
   RUNE_WEB_BUILD="$(find ~/.cargo/git/checkouts/rune-* -maxdepth 2 -name web-build.sh 2>/dev/null | head -n 1)"
 fi
 if [ -z "${RUNE_WEB_BUILD:-}" ] || [ ! -f "$RUNE_WEB_BUILD" ]; then
+  echo "rune web-build.sh missing, fetching the rune git dep..."
+  cargo fetch --target wasm32-unknown-unknown >/dev/null 2>&1 || cargo fetch >/dev/null 2>&1 || true
+  RUNE_WEB_BUILD="$(find ~/.cargo/git/checkouts/rune-* -maxdepth 2 -name web-build.sh 2>/dev/null | head -n 1)"
+fi
+if [ -z "${RUNE_WEB_BUILD:-}" ] || [ ! -f "$RUNE_WEB_BUILD" ]; then
   echo "rune web-build.sh not found (cargo fetch the rune git dep first)"
   exit 1
 fi
