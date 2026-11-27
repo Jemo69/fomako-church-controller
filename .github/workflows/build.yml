@@ -36,21 +36,22 @@ jobs:
           path: dist/fomako-church-controller-windows-x64.exe
 
   mac:
-    strategy:
-      matrix:
-        runner: [macos-14, macos-15]
-        # macos-14 = arm64 (M1+), macos-15 = arm64; add macos-13 for x64 if needed
-    runs-on: ${{ matrix.runner }}
+    # One Apple Silicon runner builds both arches (cross-compiling x86_64 on arm64 is supported).
+    runs-on: macos-15
     steps:
       - uses: actions/checkout@v4
       - uses: dtolnay/rust-toolchain@stable
         with:
           targets: aarch64-apple-darwin,x86_64-apple-darwin
-      - run: cargo build --release
-      - run: mkdir -p dist && cp target/release/fomako-church-controller dist/fomako-church-controller-mac-$(uname -m)
+      - run: cargo build --release --target aarch64-apple-darwin
+      - run: cargo build --release --target x86_64-apple-darwin
+      - run: |
+          mkdir -p dist
+          cp target/aarch64-apple-darwin/release/fomako-church-controller dist/fomako-church-controller-mac-arm64
+          cp target/x86_64-apple-darwin/release/fomako-church-controller dist/fomako-church-controller-mac-x64
       - uses: actions/upload-artifact@v4
         with:
-          name: mac-${{ matrix.runner }}
+          name: mac
           path: dist/fomako-church-controller-mac-*
 
   test:
