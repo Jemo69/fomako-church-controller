@@ -106,13 +106,79 @@ fn stepper(t: rune::tok::Theme, touch: bool, key: &str, label: &str, value: Stri
         .child(btn_labeled("+", &format!("Increase {}", label), &format!("{}-plus", key), t, bw, bh, on_plus))
 }
 
-fn apply_row<F>(t: rune::tok::Theme, dark: bool, touch: bool, key: &str, label: &str, value: &str, f: F) -> El
-where F: Fn(&mut App) + 'static {
+/// One image setting in plain language: name and hint on the left, a decimal
+/// value between − / +, and Apply right beside the value so it is obvious the
+/// two belong together. The range and VISCA code live in the small hint text.
+#[allow(clippy::too_many_arguments)]
+fn setting_row(t: rune::tok::Theme, dark: bool, touch: bool, key: &str, label: &str, hint: &str, code: &str, min: u8, max: u8, value: u8, on_value: fn(&mut App, u8), on_apply: impl Fn(&mut App) + 'static) -> El {
+    let bw = if touch { 44.0 } else { 34.0 };
     let bh = if touch { 44.0 } else { 28.0 };
-    row().key(key.to_owned()).w_full().min_h(bh + 8.0).py(2.0).center_y().gap(8.0).flex_wrap()
-        .child(text(label.to_owned()).font(type_::BODY).color(t.text).grow(1.0).min_w(104.0).wrap())
-        .child(text(value.to_owned()).font(type_::LABEL).color(t.text_secondary).min_w(72.0))
-        .child(accent_btn_labeled("Apply", &format!("Apply {}", label), &format!("{}-apply", key), dark, 76.0, bh, f))
+    let caption = format!("{} · range {}–{} · {}", hint, min, max, code);
+    let step = |glyph: &'static str, a11y: String, key: String, usable: bool, next: u8| {
+        let b = el().key(key).w(bw).h(bh).center().radius(8.0)
+            .fill(t.card).border(1.0, t.card_border)
+            .role("button").label(a11y);
+        if usable {
+            b.hover(t.hover).press(t.press).focusable(true)
+                .on_press(move |s: &mut App| on_value(s, next))
+                .child(text(glyph).font(type_::BODY).color(t.text).a11y_hidden())
+        } else {
+            b.disabled(true)
+                .child(text(glyph).font(type_::BODY).color(t.text_secondary).a11y_hidden())
+        }
+    };
+    row().key(key.to_owned()).w_full().min_h(bh + 8.0).py(4.0).center_y().gap(8.0).flex_wrap()
+        .child(
+            col().key(format!("{}-text", key)).grow(1.0).min_w(180.0).gap(2.0)
+                .child(text(label.to_owned()).font(type_::BODY).color(t.text).wrap())
+                .child(text(caption).font(type_::LABEL).color(t.text_secondary).wrap())
+        )
+        // Keep the dial and Apply in one group so a narrow window wraps them together.
+        .child(
+            row().key(format!("{}-ctl", key)).center_y().gap(8.0)
+                .child(step("−", format!("Decrease {}", label), format!("{}-minus", key), value > min, value.saturating_sub(1).max(min)))
+                .child(
+                    el().key(format!("{}-value", key)).min_w(40.0).center()
+                        .role("text").label(format!("{} is {}", label, value))
+                        .child(text(value.to_string()).font(type_::MONO_CAPTION).color(t.text))
+                )
+                .child(step("+", format!("Increase {}", label), format!("{}-plus", key), value < max, value.saturating_add(1).min(max)))
+                .child(accent_btn_labeled("Apply", &format!("Apply {}", label), &format!("{}-apply", key), dark, 76.0, bh, on_apply))
+        )
+}
+
+/// On/off or cycling setting: shows the current state and names the next action.
+fn toggle_row(t: rune::tok::Theme, dark: bool, touch: bool, key: &str, label: &str, state: &str, action: &str, f: impl Fn(&mut App) + 'static) -> El {
+    let bh = if touch { 44.0 } else { 28.0 };
+    let bw = (action.chars().count() as f32 * 7.0 + 30.0).clamp(88.0, 200.0);
+    row().key(key.to_owned()).w_full().min_h(bh + 8.0).py(4.0).center_y().gap(8.0).flex_wrap()
+        .child(
+            col().key(format!("{}-text", key)).grow(1.0).min_w(180.0).gap(2.0)
+                .child(text(label.to_owned()).font(type_::BODY).color(t.text).wrap())
+                .child(text(format!("Now: {}", state)).font(type_::LABEL).color(t.text_secondary).wrap())
+        )
+        .child(accent_btn_labeled(action, &format!("{}: {}", action, label), &format!("{}-toggle", key), dark, bw, bh, f))
+}
+
+/// Radio chips for a mutually exclusive mode (exposure, white balance).
+/// Pressing one applies it straight away, so there is no separate Send button.
+fn chip_row(t: rune::tok::Theme, dark: bool, key: &str, prefix: &str, a11y: &str, options: &[&str], codes: &[u8], selected: u8, ch: f32, on_pick: fn(&mut App, u8)) -> El {
+    let mut r = row().key(key.to_owned()).w_full().gap(6.0).center_y().flex_wrap();
+    r = r.child(text(prefix.to_owned()).font(type_::BODY).color(t.text).w(130.0));
+    for (i, m) in options.iter().enumerate() {
+        let v = codes[i];
+        let on = selected == v;
+        let label = (*m).to_string();
+        r = r.child(
+            el().key(format!("{}-{}", key, v)).h(ch).px(12.0).center().radius(ch * 0.5)
+                .fill(if on { tok::accent(0, dark) } else { t.card })
+                .hover(t.hover).focusable(true)
+                .role("radio").checked(on).label(format!("{} {}", a11y, label))
+                .on_press(move |s: &mut App| on_pick(s, v))
+                .child(text(label).font(type_::LABEL).color(if on { rune::Color::WHITE } else { t.text }).a11y_hidden())
+        );
+    }
+    r
 }
 
 pub fn view(s: &App, cx: &mut Cx<App>) -> El {
@@ -364,118 +430,76 @@ fn hint_card(t: rune::tok::Theme, msg: &str) -> El {
 // ---------------------------------------------------------------- image
 
 fn image_page(s: &App, t: rune::tok::Theme, dark: bool, touch: bool) -> El {
-    col().key("image").w_full().px(16.0).py(14.0).gap(12.0)
+    col().key("image").w_full().px(16.0).py(14.0).gap(10.0)
         .child(text(format!("Image settings → {} @ {}", s.current().name, s.current().ip)).w_full().wrap().font(type_::TITLE).color(t.text))
-        .child(text("Each row sends real VISCA to the camera. Values follow the FoMaKo manual §5.2.".to_owned()).w_full().wrap().font(type_::LABEL).color(t.text_secondary))
-                .child(section_title(t, "Exposure"))
-                .child(exposure_row(s, t, dark, touch))
-                .child(stepper(t, touch, "shutter", "Shutter", format!("0x{:02X}", s.shutter),
-                    |s: &mut App| s.shutter = s.shutter.saturating_sub(1),
-                    |s: &mut App| s.shutter = s.shutter.saturating_add(1).min(20)))
-                .child(apply_row(t, dark, touch, "shutter-a", "Shutter direct", "VISCA 4A", actions::apply_shutter))
-                .child(stepper(t, touch, "iris", "Iris", format!("0x{:02X}", s.iris),
-                    |s: &mut App| s.iris = s.iris.saturating_sub(1),
-                    |s: &mut App| s.iris = s.iris.saturating_add(1).min(20)))
-                .child(apply_row(t, dark, touch, "iris-a", "Iris direct", "VISCA 4B", actions::apply_iris))
-                .child(stepper(t, touch, "gain", "Gain limit", format!("{}", s.gain_limit),
-                    |s: &mut App| s.gain_limit = s.gain_limit.saturating_sub(1),
-                    |s: &mut App| s.gain_limit = s.gain_limit.saturating_add(1).min(15)))
-                .child(apply_row(t, dark, touch, "gain-a", "Gain limit", "VISCA 2C", actions::apply_gain_limit))
-                .child(stepper(t, touch, "brightlvl", "Bright level", format!("{}", s.bright_lvl),
-                    |s: &mut App| s.bright_lvl = s.bright_lvl.saturating_sub(1),
-                    |s: &mut App| s.bright_lvl = s.bright_lvl.saturating_add(1).min(23)))
-                .child(apply_row(t, dark, touch, "brightlvl-a", "Bright", "VISCA 4D", actions::apply_bright_lvl))
-                .child(section_title(t, "Backlight / WDR / NR"))
-                .child(apply_row(t, dark, touch, "blc", "Backlight", if s.backlight { "ON" } else { "OFF" }, |s: &mut App| { s.backlight = !s.backlight; actions::apply_backlight(s); }))
-                .child(stepper(t, touch, "wdr", "WDR level", format!("{}", s.wdr),
-                    |s: &mut App| s.wdr = s.wdr.saturating_sub(1),
-                    |s: &mut App| s.wdr = s.wdr.saturating_add(1).min(7)))
-                .child(apply_row(t, dark, touch, "wdr-a", "WDR", "VISCA 51", actions::apply_wdr))
-                .child(stepper(t, touch, "nr2d", "NR 2D (0-7)", format!("{}", s.nr2d),
-                    |s: &mut App| s.nr2d = s.nr2d.saturating_sub(1),
-                    |s: &mut App| s.nr2d = s.nr2d.saturating_add(1).min(7)))
-                .child(stepper(t, touch, "nr3d", "NR 3D (0-8)", format!("{}", s.nr3d),
-                    |s: &mut App| s.nr3d = s.nr3d.saturating_sub(1),
-                    |s: &mut App| s.nr3d = s.nr3d.saturating_add(1).min(8)))
-                .child(apply_row(t, dark, touch, "nr-a", "Noise reduction", "VISCA 53/54", actions::apply_nr))
-                .child(section_title(t, "White balance / color"))
-                .child(wb_row(s, t, dark, touch))
-                .child(stepper(t, touch, "rgain", "R Gain", format!("{}", s.r_gain),
-                    |s: &mut App| s.r_gain = s.r_gain.saturating_sub(1),
-                    |s: &mut App| s.r_gain = s.r_gain.saturating_add(1)))
-                .child(stepper(t, touch, "bgain", "B Gain", format!("{}", s.b_gain),
-                    |s: &mut App| s.b_gain = s.b_gain.saturating_sub(1),
-                    |s: &mut App| s.b_gain = s.b_gain.saturating_add(1)))
-                .child(apply_row(t, dark, touch, "gains", "R/B Gain", "VISCA 43/44", actions::apply_gains))
-                .child(section_title(t, "Picture (brightness / contrast / saturation / sharpness)"))
-                .child(stepper(t, touch, "brightness", "Brightness", format!("{}", s.brightness),
-                    |s: &mut App| s.brightness = s.brightness.saturating_sub(1),
-                    |s: &mut App| s.brightness = (s.brightness + 1).min(14)))
-                .child(apply_row(t, dark, touch, "brightness-a", "Brightness", "VISCA A1", actions::apply_brightness))
-                .child(stepper(t, touch, "contrast", "Contrast", format!("{}", s.contrast),
-                    |s: &mut App| s.contrast = s.contrast.saturating_sub(1),
-                    |s: &mut App| s.contrast = (s.contrast + 1).min(14)))
-                .child(apply_row(t, dark, touch, "contrast-a", "Contrast", "VISCA A2", actions::apply_contrast))
-                .child(stepper(t, touch, "sat", "Saturation 0-14", format!("{} (60-200%)", s.saturation),
-                    |s: &mut App| s.saturation = s.saturation.saturating_sub(1),
-                    |s: &mut App| s.saturation = (s.saturation + 1).min(14)))
-                .child(apply_row(t, dark, touch, "sat-a", "Saturation", "VISCA 49", actions::apply_saturation))
-                .child(stepper(t, touch, "aperture", "Sharpness 0-15", format!("{}", s.aperture),
-                    |s: &mut App| s.aperture = s.aperture.saturating_sub(1),
-                    |s: &mut App| s.aperture = (s.aperture + 1).min(15)))
-                .child(apply_row(t, dark, touch, "aperture-a", "Sharpness", "VISCA 42", actions::apply_aperture))
-                .child(section_title(t, "Misc"))
-                .child(stepper(t, touch, "gamma", "Gamma 0-4", format!("{}", s.gamma),
-                    |s: &mut App| s.gamma = s.gamma.saturating_sub(1),
-                    |s: &mut App| s.gamma = (s.gamma + 1).min(4)))
-                .child(apply_row(t, dark, touch, "gamma-a", "Gamma", "VISCA 5B", actions::apply_gamma))
-                .child(apply_row(t, dark, touch, "flicker", "Flicker", match s.flicker { 1 => "50Hz", 2 => "60Hz", _ => "OFF" }, |s: &mut App| { s.flicker = (s.flicker + 1) % 3; actions::apply_flicker(s); }))
-                .child(apply_row(t, dark, touch, "lowlight", "Low-light", if s.lowlight { "ON" } else { "OFF" }, |s: &mut App| { s.lowlight = !s.lowlight; actions::apply_lowlight(s); }))
-                .child(apply_row(t, dark, touch, "flip", "Flip", match s.flip { 1 => "H", 2 => "V", 3 => "HV", _ => "OFF" }, |s: &mut App| { s.flip = (s.flip + 1) % 4; actions::apply_flip(s); }))
-                .child(apply_row(t, dark, touch, "bw", "B/W mode", if s.bw { "B&W" } else { "Color" }, |s: &mut App| { s.bw = !s.bw; actions::apply_bw(s); }))
+        .child(text("Pick a value with − / +, then press Apply to send it to the camera. Mode chips send immediately.".to_owned()).w_full().wrap().font(type_::LABEL).color(t.text_secondary))
+        .child(section_title(t, "Exposure"))
+        .child(exposure_row(s, t, dark, touch))
+        .child(setting_row(t, dark, touch, "shutter", "Shutter speed", "Higher number = longer exposure", "VISCA 4A", 0, 20, s.shutter,
+            |s, v| s.shutter = v, actions::apply_shutter))
+        .child(setting_row(t, dark, touch, "iris", "Iris", "Higher number = more light in", "VISCA 4B", 0, 20, s.iris,
+            |s, v| s.iris = v, actions::apply_iris))
+        .child(setting_row(t, dark, touch, "gain", "Gain limit", "Caps how much the camera brightens a dark scene", "VISCA 2C", 0, 15, s.gain_limit,
+            |s, v| s.gain_limit = v, actions::apply_gain_limit))
+        .child(setting_row(t, dark, touch, "brightlvl", "Bright level", "Overall brightness in Bright exposure mode", "VISCA 4D", 0, 23, s.bright_lvl,
+            |s, v| s.bright_lvl = v, actions::apply_bright_lvl))
+        .child(section_title(t, "Backlight / WDR / noise reduction"))
+        .child(toggle_row(t, dark, touch, "blc", "Backlight compensation", if s.backlight { "On" } else { "Off" }, if s.backlight { "Turn off" } else { "Turn on" },
+            |s: &mut App| { s.backlight = !s.backlight; actions::apply_backlight(s); }))
+        .child(setting_row(t, dark, touch, "wdr", "WDR (wide dynamic range)", "Brightens shadowed faces against a bright window", "VISCA 51", 0, 7, s.wdr,
+            |s, v| s.wdr = v, actions::apply_wdr))
+        .child(setting_row(t, dark, touch, "nr2d", "Noise reduction (2D)", "Removes grain in flat areas", "VISCA 53", 0, 7, s.nr2d,
+            |s, v| s.nr2d = v, actions::apply_nr2d))
+        .child(setting_row(t, dark, touch, "nr3d", "Noise reduction (3D)", "Removes grain in motion; high values smear movement", "VISCA 54", 0, 8, s.nr3d,
+            |s, v| s.nr3d = v, actions::apply_nr3d))
+        .child(section_title(t, "White balance / color"))
+        .child(wb_row(s, t, dark, touch))
+        .child(setting_row(t, dark, touch, "rgain", "Red gain", "Fine-tunes colour in Manual white balance", "VISCA 43", 0, 255, s.r_gain,
+            |s, v| s.r_gain = v, actions::apply_r_gain))
+        .child(setting_row(t, dark, touch, "bgain", "Blue gain", "Fine-tunes colour in Manual white balance", "VISCA 44", 0, 255, s.b_gain,
+            |s, v| s.b_gain = v, actions::apply_b_gain))
+        .child(section_title(t, "Picture"))
+        .child(setting_row(t, dark, touch, "brightness", "Brightness", "Same effect as the Picture tab brightness slider", "VISCA A1", 0, 14, s.brightness,
+            |s, v| s.brightness = v, actions::apply_brightness))
+        .child(setting_row(t, dark, touch, "contrast", "Contrast", "Higher number = punchier picture", "VISCA A2", 0, 14, s.contrast,
+            |s, v| s.contrast = v, actions::apply_contrast))
+        .child(setting_row(t, dark, touch, "sat", "Saturation", "0 = least colour (60%), 14 = most (200%)", "VISCA 49", 0, 14, s.saturation,
+            |s, v| s.saturation = v, actions::apply_saturation))
+        .child(setting_row(t, dark, touch, "aperture", "Sharpness", "Detail enhancement; too high looks crunchy", "VISCA 42", 0, 15, s.aperture,
+            |s, v| s.aperture = v, actions::apply_aperture))
+        .child(section_title(t, "Misc"))
+        .child(setting_row(t, dark, touch, "gamma", "Gamma", "Mid-tone contrast without clipping highlights", "VISCA 5B", 0, 4, s.gamma,
+            |s, v| s.gamma = v, actions::apply_gamma))
+        .child(toggle_row(t, dark, touch, "flicker", "Flicker reduction", match s.flicker { 1 => "50 Hz", 2 => "60 Hz", _ => "Off" }, match s.flicker { 1 => "Set 60 Hz", 2 => "Turn off", _ => "Set 50 Hz" },
+            |s: &mut App| { s.flicker = (s.flicker + 1) % 3; actions::apply_flicker(s); }))
+        .child(toggle_row(t, dark, touch, "lowlight", "Low-light mode", if s.lowlight { "On" } else { "Off" }, if s.lowlight { "Turn off" } else { "Turn on" },
+            |s: &mut App| { s.lowlight = !s.lowlight; actions::apply_lowlight(s); }))
+        .child(toggle_row(t, dark, touch, "flip", "Image flip", match s.flip { 1 => "Horizontal", 2 => "Vertical", 3 => "Horizontal + vertical", _ => "Off" }, match s.flip { 1 => "Next: vertical", 2 => "Next: both", 3 => "Turn off", _ => "Next: horizontal" },
+            |s: &mut App| { s.flip = (s.flip + 1) % 4; actions::apply_flip(s); }))
+        .child(toggle_row(t, dark, touch, "bw", "Picture mode", if s.bw { "Black & white" } else { "Colour" }, if s.bw { "Switch to colour" } else { "Switch to B&W" },
+            |s: &mut App| { s.bw = !s.bw; actions::apply_bw(s); }))
+}
+
+fn set_ae_mode(s: &mut App, code: u8) {
+    s.ae_mode = code;
+    actions::apply_ae(s);
+}
+
+fn set_wb_mode(s: &mut App, code: u8) {
+    s.wb_mode = code;
+    actions::apply_wb(s);
 }
 
 fn exposure_row(s: &App, t: rune::tok::Theme, dark: bool, touch: bool) -> El {
     let modes = ["Auto", "Manual", "Shutter", "Iris", "Bright"];
     let ch = if touch { 40.0 } else { 28.0 };
-    let mut r = row().key("ae-row").w_full().gap(6.0).center_y().flex_wrap();
-    r = r.child(text(format!("Mode: {}", s.ae_label())).font(type_::BODY).color(t.text).w(130.0));
-    for (i, m) in modes.iter().enumerate() {
-        let on = s.ae_mode as usize == i;
-        let label = m.to_string();
-        r = r.child(
-            el().key(format!("ae-{}", i)).h(ch).px(12.0).center().radius(ch * 0.5)
-                .fill(if on { tok::accent(0, dark) } else { t.card })
-                .hover(t.hover).focusable(true)
-                .role("radio").checked(on).label(format!("Exposure {}", label))
-                .on_press(move |s: &mut App| { s.ae_mode = i as u8; actions::apply_ae(s); })
-                .child(text(label).font(type_::LABEL).color(if on { rune::Color::WHITE } else { t.text }).a11y_hidden())
-        );
-    }
-    r = r.child(accent_btn_labeled("Send", "Send exposure mode", "ae-send", dark, 64.0, ch, actions::apply_ae));
-    r
+    chip_row(t, dark, "ae", &format!("Mode: {}", s.ae_label()), "Exposure", &modes, &[0, 1, 2, 3, 4], s.ae_mode, ch, set_ae_mode)
 }
 
 fn wb_row(s: &App, t: rune::tok::Theme, dark: bool, touch: bool) -> El {
     let modes = ["Auto", "3000K", "4000K", "1-Push", "Manual", "6500K"];
-    let map = [0u8, 1, 2, 3, 5, 6];
-    let ch = if touch { 40.0 } else { 26.0 };
-    let mut r = row().key("wb-row").w_full().gap(6.0).center_y().flex_wrap();
-    r = r.child(text(format!("WB: {}", s.wb_label())).font(type_::BODY).color(t.text).w(130.0));
-    for (idx, m) in modes.iter().enumerate() {
-        let v = map[idx];
-        let on = s.wb_mode == v;
-        let label = m.to_string();
-        r = r.child(
-            el().key(format!("wb-{}", v)).h(ch).px(10.0).center().radius(ch * 0.5)
-                .fill(if on { tok::accent(0, dark) } else { t.card })
-                .hover(t.hover).focusable(true)
-                .role("radio").checked(on).label(format!("White balance {}", label))
-                .on_press(move |s: &mut App| { s.wb_mode = v; actions::apply_wb(s); })
-                .child(text(label).font(type_::LABEL).color(if on { rune::Color::WHITE } else { t.text }).a11y_hidden())
-        );
-    }
-    r
+    let ch = if touch { 40.0 } else { 28.0 };
+    chip_row(t, dark, "wb", &format!("Mode: {}", s.wb_label()), "White balance", &modes, &[0, 1, 2, 3, 5, 6], s.wb_mode, ch, set_wb_mode)
 }
 
 // ---------------------------------------------------------------- picture edit
