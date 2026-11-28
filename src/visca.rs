@@ -387,6 +387,19 @@ pub fn sony_encapsulate(payload: &[u8], seq: u32) -> Vec<u8> {
     out
 }
 
+fn camera_error(body: &[u8]) -> Option<String> {
+    for frame in body.split(|&b| b == 0xFF) {
+        if frame.len() >= 2
+            && frame[0] >= 0x90
+            && frame[0] & 0x0F == 0
+            && frame[1] & 0xF0 == 0x60
+        {
+            return Some(format!("camera error ({})", hex(frame)));
+        }
+    }
+    None
+}
+
 fn send_sony_udp(ip: &str, port: u16, payload: &[u8]) -> Result<String, String> {
     let seq = SEQ.fetch_add(1, Ordering::SeqCst);
     let packet = sony_encapsulate(payload, seq);
@@ -408,12 +421,8 @@ fn send_sony_udp(ip: &str, port: u16, payload: &[u8]) -> Result<String, String> 
             } else {
                 &buf[..n]
             };
-            if reply.len() >= 2
-                && reply[0] >= 0x90
-                && reply[0] & 0x0F == 0
-                && reply[1] & 0xF0 == 0x60
-            {
-                return Err(format!("camera error ({})", hex(reply)));
+            if let Some(error) = camera_error(reply) {
+                return Err(error);
             }
             Ok(format!("sent {}B seq={} ack {}B", packet.len(), seq, n))
         }
@@ -460,10 +469,10 @@ pub fn send_blocking(ip: &str, port: u16, protocol: Protocol, payload: &[u8]) ->
 /// ACK (not a rejection); `90 6x` is the only error that is reported.
 pub fn send_only(ip: &str, port: u16, protocol: Protocol, payload: &[u8]) -> Result<(), String> {
     fn check(body: &[u8]) -> Result<(), String> {
-        if body.len() >= 2 && body[0] >= 0x90 && body[0] & 0x0F == 0 && body[1] & 0xF0 == 0x60 {
-            return Err(format!("camera error ({})", hex(body)));
+        match camera_error(body) {
+            Some(error) => Err(error),
+            None => Ok(()),
         }
-        Ok(())
     }
     match protocol {
         Protocol::SonyUdp => {
@@ -537,13 +546,11 @@ pub fn query_blocking(ip: &str, port: u16, protocol: Protocol, payload: &[u8]) -
                         } else {
                             reply
                         };
-                        if body.len() >= 2 && body[0] >= 0x90 && body[0] & 0x0F == 0 {
-                            if body[1] == 0x50 {
-                                return Ok(reply.to_vec());
-                            }
-                            if body[1] & 0xF0 == 0x60 {
-                                return Err(format!("camera error ({})", hex(body)));
-                            }
+                        if let Some(error) = camera_error(body) {
+                            return Err(error);
+                        }
+                        if body.len() >= 2 && body[0] >= 0x90 && body[0] & 0x0F == 0 && body[1] == 0x50 {
+                            return Ok(reply.to_vec());
                         }
                         // 90 41 is ACK; keep reading for the 90 50 reply.
                     }
@@ -587,13 +594,11 @@ pub fn query_blocking(ip: &str, port: u16, protocol: Protocol, payload: &[u8]) -
                             } else {
                                 &frame[..]
                             };
-                            if body.len() >= 2 && body[0] >= 0x90 && body[0] & 0x0F == 0 {
-                                if body[1] == 0x50 {
-                                    return Ok(frame);
-                                }
-                                if body[1] & 0xF0 == 0x60 {
-                                    return Err(format!("camera error ({})", hex(body)));
-                                }
+                            if let Some(error) = camera_error(body) {
+                                return Err(error);
+                            }
+                            if body.len() >= 2 && body[0] >= 0x90 && body[0] & 0x0F == 0 && body[1] == 0x50 {
+                                return Ok(frame);
                             }
                         }
                     }
@@ -729,6 +734,21 @@ mod tests {
         let bytes = query_blocking("127.0.0.1", port, Protocol::SonyUdp, &pan_tilt_pos_inq(1))
             .expect("position reply");
         assert_eq!(parse_pan_tilt_pos(&bytes), Some((0x1234, 0x0ABC)));
+    }
+
+    #[test]
+    fn send_only_reports_a_camera_error() {
+        let camera = UdpSocket::bind("127.0.0.1:0").expect("bind fake camera");
+        let port = camera.local_addr().unwrap().port();
+        std::thread::spawn(move || {
+            let mut packet = [0u8; 128];
+            let (_, source) = camera.recv_from(&mut packet).expect("receive command");
+            camera
+                .send_to(&[0x01, 0x00, 0x00, 0x03, 0, 0, 0, 1, 0x90, 0x60, 0x02, 0xFF], source)
+                .unwrap();
+        });
+        let error = send_only("127.0.0.1", port, Protocol::SonyUdp, &power(1, true)).unwrap_err();
+        assert!(error.contains("camera error"), "{error}");
     }
 
     #[test]

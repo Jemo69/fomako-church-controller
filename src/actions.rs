@@ -642,6 +642,17 @@ fn follow_start(app: &mut App) {
             pan_speed: app.pan_speed,
             tilt_speed: app.tilt_speed,
         };
+        // A follower left in camera-side tracking ignores pan/tilt; turn it off.
+        let (protocol, port) = (
+            spec.follower.protocol.to_protocol(),
+            spec.follower.protocol.port(),
+        );
+        let _ = visca::send_only(
+            &spec.follower.ip,
+            port,
+            protocol,
+            &visca::tracking(spec.follower.address, false, false),
+        );
         app.follow_gen.fetch_add(1, Ordering::SeqCst);
         let gen = app.follow_gen.load(Ordering::SeqCst);
         follow::start(

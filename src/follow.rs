@@ -28,6 +28,7 @@ use crate::visca::{self, Protocol};
 pub const OFFSET_MAX: i32 = 0x7FFF;
 /// ~0.1° at the documented ~0.5° per 100 counts; the camera's own aim accuracy.
 pub const DEADBAND: i32 = 20;
+#[cfg(not(target_arch = "wasm32"))]
 const RESEND: Duration = Duration::from_secs(2);
 #[cfg(not(target_arch = "wasm32"))]
 const TICK: Duration = Duration::from_millis(120);
@@ -54,7 +55,10 @@ pub struct FollowSaved {
 
 fn paths() -> Vec<std::path::PathBuf> {
     let cwd = std::path::PathBuf::from("fomako-follow.json");
-    let cwd_abs = std::env::current_dir().ok().map(|d| d.join("fomako-follow.json"));
+    let cwd_abs = std::env::current_dir()
+        .ok()
+        .and_then(|d| d.canonicalize().ok())
+        .map(|d| d.join("fomako-follow.json"));
     let exe = std::env::current_exe()
         .ok()
         .and_then(|p| p.parent().map(|d| d.join("fomako-follow.json")));
@@ -69,10 +73,10 @@ fn load_from(path: &std::path::Path) -> Option<FollowSaved> {
     serde_json::from_str(&text).ok()
 }
 
-pub fn load_saved() -> Option<FollowSaved> {
+fn load_newest(paths: Vec<std::path::PathBuf>) -> Option<FollowSaved> {
     // Prefer the newest copy, so a stale working-directory file cannot
     // shadow an offset written beside the app.
-    paths()
+    paths
         .into_iter()
         .filter_map(|path| {
             let modified = std::fs::metadata(&path).and_then(|m| m.modified()).ok()?;
@@ -82,29 +86,40 @@ pub fn load_saved() -> Option<FollowSaved> {
         .map(|(_, saved)| saved)
 }
 
+pub fn load_saved() -> Option<FollowSaved> {
+    load_newest(paths())
+}
+
 fn write_one(path: &std::path::Path, text: &str) -> Result<(), String> {
+    use std::io::Write;
     let tmp = path.with_extension("json.tmp");
-    std::fs::write(&tmp, text).map_err(|e| format!("{}: {e}", tmp.display()))?;
-    if std::fs::rename(&tmp, path).is_ok() {
-        return Ok(());
-    }
-    // Very defensive fallback; the first rename is atomic and replaces on
-    // both Unix and Windows.
-    let _ = std::fs::remove_file(path);
-    let result = std::fs::rename(&tmp, path).map_err(|e| format!("{}: {e}", path.display()));
-    if result.is_err() {
+    let written = (|| -> std::io::Result<()> {
+        let mut file = std::fs::File::create(&tmp)?;
+        file.write_all(text.as_bytes())?;
+        file.sync_all()
+    })();
+    if let Err(error) = written {
         let _ = std::fs::remove_file(&tmp);
+        return Err(format!("{}: {error}", tmp.display()));
     }
-    result
+    if std::fs::rename(&tmp, path).is_err() {
+        let _ = std::fs::remove_file(&tmp);
+        return Err(format!("{}: could not replace", path.display()));
+    }
+    Ok(())
 }
 
 /// Write every portable copy. A read-only location does not discard a writable one.
 pub fn save(saved: &FollowSaved) -> Result<(), String> {
+    save_to(&paths(), saved)
+}
+
+fn save_to(paths: &[std::path::PathBuf], saved: &FollowSaved) -> Result<(), String> {
     let text = serde_json::to_string_pretty(saved).map_err(|e| e.to_string())?;
     let mut first_error = None;
     let mut wrote = false;
-    for path in paths() {
-        match write_one(&path, &text) {
+    for path in paths {
+        match write_one(path, &text) {
             Ok(()) => wrote = true,
             Err(error) => {
                 if first_error.is_none() {
@@ -265,8 +280,15 @@ pub fn start(
                     let mut tick_error = false;
                     let stale = last_sent_at
                         .map(|at| at.elapsed() >= RESEND)
-                        .unwrap_or(true);
-                    if needs_move(last_sent, target) || stale {
+                        .unwrap_or(false);
+                    let follower_off = stale
+                        && query_pos(&spec.follower)
+                            .map(|(fp, ft)| {
+                                shortest_delta(fp, target.0).abs() > DEADBAND
+                                    || shortest_delta(ft, target.1).abs() > DEADBAND
+                            })
+                            .unwrap_or(true);
+                    if needs_move(last_sent, target) || follower_off {
                         let (protocol, port) = proto(&spec.follower);
                         let payload = visca::pan_tilt_absolute(
                             spec.follower.address,
@@ -402,6 +424,51 @@ mod tests {
         let cameras = vec![cam("192.168.5.163"), cam("192.168.5.163"), cam("192.168.5.164")];
         assert!(save_pair(&cameras, 0, 1, 0, 0).is_err());
         assert!(save_pair(&cameras, 0, 0, 0, 0).is_err());
+    }
+
+    #[test]
+    fn newest_copy_wins() {
+        let dir = std::env::temp_dir().join(format!(
+            "fomako-follow-newest-{}",
+            std::process::id()
+        ));
+        std::fs::create_dir_all(&dir).unwrap();
+        let old = dir.join("old.json");
+        let new = dir.join("new.json");
+        let saved = |pan| FollowSaved {
+            leader_ip: "a".into(),
+            follower_ip: "b".into(),
+            pan_offset: pan,
+            tilt_offset: 0,
+        };
+        std::fs::write(&old, serde_json::to_string(&saved(1)).unwrap()).unwrap();
+        std::thread::sleep(Duration::from_millis(20));
+        std::fs::write(&new, serde_json::to_string(&saved(2)).unwrap()).unwrap();
+        assert_eq!(load_newest(vec![old.clone(), new.clone()]).unwrap().pan_offset, 2);
+        std::fs::remove_dir_all(&dir).unwrap();
+    }
+
+    #[test]
+    fn partial_save_reports_an_error_but_keeps_the_writable_copy() {
+        let dir = std::env::temp_dir().join(format!(
+            "fomako-follow-partial-{}",
+            std::process::id()
+        ));
+        std::fs::create_dir_all(&dir).unwrap();
+        let good = dir.join("good.json");
+        let blocker = dir.join("blocker");
+        std::fs::write(&blocker, b"not a directory").unwrap();
+        let bad = blocker.join("bad.json");
+        let saved = FollowSaved {
+            leader_ip: "a".into(),
+            follower_ip: "b".into(),
+            pan_offset: 7,
+            tilt_offset: 8,
+        };
+        let result = save_to(&[good.clone(), bad], &saved);
+        assert!(result.is_err(), "partial write must be reported");
+        assert_eq!(load_from(&good).unwrap().pan_offset, 7);
+        std::fs::remove_dir_all(&dir).unwrap();
     }
 
     #[test]
