@@ -26,6 +26,7 @@ use crate::visca::{self, Protocol};
 
 /// Largest magnitude accepted for a stored or nudged offset.
 pub const OFFSET_MAX: i32 = 0x7FFF;
+pub const OFFSET_MIN: i32 = i16::MIN as i32;
 /// ~0.1° at the documented ~0.5° per 100 counts; the camera's own aim accuracy.
 pub const DEADBAND: i32 = 20;
 #[cfg(not(target_arch = "wasm32"))]
@@ -227,8 +228,8 @@ pub fn calibrate(leader: &CameraConfig, follower: &CameraConfig) -> Result<(i32,
     }
     let (pan, tilt) = offset_from(first, follower_pos);
     Ok((
-        pan.clamp(i16::MIN as i32, OFFSET_MAX),
-        tilt.clamp(i16::MIN as i32, OFFSET_MAX),
+        pan.clamp(OFFSET_MIN, OFFSET_MAX),
+        tilt.clamp(OFFSET_MIN, OFFSET_MAX),
     ))
 }
 

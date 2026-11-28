@@ -521,6 +521,13 @@ pub fn send_only(ip: &str, port: u16, protocol: Protocol, payload: &[u8]) -> Res
     }
 }
 
+fn ack_ok(body: &[u8]) -> bool {
+    body.len() >= 2
+        && body[0] >= 0x90
+        && body[0] & 0x0F == 0
+        && matches!(body[1] & 0xF0, 0x40 | 0x50)
+}
+
 /// Send a command and require an ACK/completion. Used where silence must not
 /// be mistaken for success (e.g. turning a follower's AI tracking off).
 pub fn send_ack(ip: &str, port: u16, protocol: Protocol, payload: &[u8]) -> Result<(), String> {
@@ -550,8 +557,7 @@ pub fn send_ack(ip: &str, port: u16, protocol: Protocol, payload: &[u8]) -> Resu
             if let Some(error) = camera_error(body) {
                 return Err(error);
             }
-            if body.len() >= 2 && body[0] >= 0x90 && body[0] & 0x0F == 0 && (body[1] & 0xF0 == 0x40 || body[1] & 0xF0 == 0x50)
-            {
+            if ack_ok(body) {
                 Ok(())
             } else {
                 Err("camera did not acknowledge".to_string())
@@ -579,8 +585,7 @@ pub fn send_ack(ip: &str, port: u16, protocol: Protocol, payload: &[u8]) -> Resu
             if let Some(error) = camera_error(body) {
                 return Err(error);
             }
-            if body.len() >= 2 && body[0] >= 0x90 && body[0] & 0x0F == 0 && (body[1] & 0xF0 == 0x40 || body[1] & 0xF0 == 0x50)
-            {
+            if ack_ok(body) {
                 Ok(())
             } else {
                 Err("camera did not acknowledge".to_string())
@@ -815,6 +820,70 @@ mod tests {
         let bytes = query_blocking("127.0.0.1", port, Protocol::SonyUdp, &pan_tilt_pos_inq(1))
             .expect("position reply");
         assert_eq!(parse_pan_tilt_pos(&bytes), Some((0x1234, 0x0ABC)));
+    }
+
+    #[test]
+    fn send_ack_requires_an_acknowledgement() {
+        let camera = UdpSocket::bind("127.0.0.1:0").expect("bind fake camera");
+        let port = camera.local_addr().unwrap().port();
+        std::thread::spawn(move || {
+            let mut packet = [0u8; 128];
+            let (_, source) = camera.recv_from(&mut packet).expect("receive command");
+            camera.send_to(&[0x01, 0x00, 0x00, 0x03, 0, 0, 0, 1, 0x90, 0x41, 0xFF], source).unwrap();
+        });
+        assert!(send_ack("127.0.0.1", port, Protocol::SonyUdp, &power(1, true)).is_ok());
+
+        let camera = UdpSocket::bind("127.0.0.1:0").expect("bind fake camera");
+        let port = camera.local_addr().unwrap().port();
+        std::thread::spawn(move || {
+            let mut packet = [0u8; 128];
+            let (_, source) = camera.recv_from(&mut packet).expect("receive command");
+            camera.send_to(&[0x01, 0x00, 0x00, 0x03, 0, 0, 0, 1, 0x90, 0x60, 0x02, 0xFF], source).unwrap();
+        });
+        assert!(send_ack("127.0.0.1", port, Protocol::SonyUdp, &power(1, true))
+            .unwrap_err()
+            .contains("camera error"));
+
+        let camera = UdpSocket::bind("127.0.0.1:0").expect("bind fake camera");
+        let port = camera.local_addr().unwrap().port();
+        std::thread::spawn(move || {
+            let mut packet = [0u8; 128];
+            let _ = camera.recv_from(&mut packet).expect("receive command");
+        });
+        assert!(send_ack("127.0.0.1", port, Protocol::SonyUdp, &power(1, true))
+            .unwrap_err()
+            .contains("did not acknowledge"));
+    }
+
+    #[test]
+    fn inquiry_ignores_a_wrong_sequence_and_accepts_the_match() {
+        let camera = UdpSocket::bind("127.0.0.1:0").expect("bind fake camera");
+        let port = camera.local_addr().unwrap().port();
+        std::thread::spawn(move || {
+            let mut packet = [0u8; 128];
+            let (n, source) = camera.recv_from(&mut packet).expect("receive inquiry");
+            let seq = u32::from_be_bytes([packet[4], packet[5], packet[6], packet[7]]);
+            let body = [0x90, 0x50, 0x01, 0x02, 0x03, 0x04, 0x00, 0x0A, 0x0B, 0x0C, 0xFF];
+            camera.send_to(&sony_encapsulate(&body, seq.wrapping_add(1)), source).unwrap();
+            camera.send_to(&sony_encapsulate(&body, seq), source).unwrap();
+        });
+        let bytes = query_blocking("127.0.0.1", port, Protocol::SonyUdp, &pan_tilt_pos_inq(1))
+            .expect("matching reply");
+        assert_eq!(parse_pan_tilt_pos(&bytes), Some((0x1234, 0x0ABC)));
+    }
+
+    #[test]
+    fn inquiry_rejects_a_wrong_sequence_only() {
+        let camera = UdpSocket::bind("127.0.0.1:0").expect("bind fake camera");
+        let port = camera.local_addr().unwrap().port();
+        std::thread::spawn(move || {
+            let mut packet = [0u8; 128];
+            let (n, source) = camera.recv_from(&mut packet).expect("receive inquiry");
+            let seq = u32::from_be_bytes([packet[4], packet[5], packet[6], packet[7]]);
+            let body = [0x90, 0x50, 0x01, 0x02, 0x03, 0x04, 0x00, 0x0A, 0x0B, 0x0C, 0xFF];
+            camera.send_to(&sony_encapsulate(&body, seq.wrapping_add(1)), source).unwrap();
+        });
+        assert!(query_blocking("127.0.0.1", port, Protocol::SonyUdp, &pan_tilt_pos_inq(1)).is_err());
     }
 
     #[test]

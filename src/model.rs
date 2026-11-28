@@ -286,8 +286,8 @@ impl App {
                     (Some(l), Some(f)) if l != f => (
                         l,
                         f,
-                        sv.pan_offset.clamp(-crate::follow::OFFSET_MAX, crate::follow::OFFSET_MAX),
-                        sv.tilt_offset.clamp(-crate::follow::OFFSET_MAX, crate::follow::OFFSET_MAX),
+                        sv.pan_offset.clamp(crate::follow::OFFSET_MIN, crate::follow::OFFSET_MAX),
+                        sv.tilt_offset.clamp(crate::follow::OFFSET_MIN, crate::follow::OFFSET_MAX),
                         true,
                     ),
                     _ => (0, 1, 0, 0, false),

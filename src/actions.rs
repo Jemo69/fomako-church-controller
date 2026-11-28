@@ -614,6 +614,7 @@ pub fn follow_stop(app: &mut App) {
     if app.follow_on {
         app.follow_status = "Stopped — leader aim is no longer sent to the follower.".to_string();
         if app.selected == app.follow_follower {
+            app.track_on = false;
             app.track_status = "Off — camera aims manually".to_string();
         }
     }
@@ -646,6 +647,10 @@ fn follow_start(app: &mut App) {
     }
     #[cfg(not(target_arch = "wasm32"))]
     {
+        if app.selected == f && app.track_on {
+            app.track_on = false;
+            app.track_status = "Off — driven by cross-camera follow".to_string();
+        }
         let leader = app.cameras[l].clone();
         let follower = app.cameras[f].clone();
         let spec = FollowSpec {
@@ -695,6 +700,10 @@ pub fn follow_calibrate(app: &mut App) {
     }
     #[cfg(not(target_arch = "wasm32"))]
     {
+        if app.selected == f && app.track_on {
+            app.track_on = false;
+            app.track_status = "Off — driven by cross-camera follow".to_string();
+        }
         let leader = app.cameras[l].clone();
         let follower = app.cameras[f].clone();
         let slot = app.follow_slot.clone();
@@ -724,8 +733,8 @@ pub fn follow_adjust(app: &mut App, pan_delta: i32, tilt_delta: i32) {
         return;
     }
     let was_running = app.follow_on;
-    app.follow_pan_offset = (app.follow_pan_offset + pan_delta).clamp(-follow::OFFSET_MAX, follow::OFFSET_MAX);
-    app.follow_tilt_offset = (app.follow_tilt_offset + tilt_delta).clamp(-follow::OFFSET_MAX, follow::OFFSET_MAX);
+    app.follow_pan_offset = (app.follow_pan_offset + pan_delta).clamp(follow::OFFSET_MIN, follow::OFFSET_MAX);
+    app.follow_tilt_offset = (app.follow_tilt_offset + tilt_delta).clamp(follow::OFFSET_MIN, follow::OFFSET_MAX);
     if was_running {
         // Restart the loop so the new offset takes effect now.
         follow_stop(app);
