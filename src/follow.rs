@@ -12,10 +12,10 @@
 //! mapping, not a depth-corrected 3D solve. It is the closest behaviour the
 //! hardware supports without a vision tracker in this app.
 
-use std::sync::atomic::AtomicU64;
-use std::sync::{Arc, Mutex};
 #[cfg(not(target_arch = "wasm32"))]
-use std::sync::atomic::Ordering;
+use std::sync::atomic::{AtomicU64, Ordering};
+#[cfg(not(target_arch = "wasm32"))]
+use std::sync::{Arc, Mutex};
 #[cfg(not(target_arch = "wasm32"))]
 use std::time::Duration;
 
@@ -25,7 +25,7 @@ use crate::model::CameraConfig;
 #[cfg(not(target_arch = "wasm32"))]
 use crate::visca::{self, Protocol};
 
-/// Position values are 16-bit (`0Y 0Y 0Y 0Y`).
+/// Position values are 16-bit linear counts (`0Y 0Y 0Y 0Y`).
 pub const POS_MAX: i32 = 0xFFFF;
 const DEADBAND: i32 = 3;
 #[cfg(not(target_arch = "wasm32"))]
@@ -35,9 +35,11 @@ const TICK: Duration = Duration::from_millis(120);
 pub enum FollowEvent {
     Status(String),
     Error(String),
+    Calibrated { gen: u64, pan: i32, tilt: i32 },
+    CalibrationError { gen: u64, msg: String },
 }
 
-#[derive(Clone, Debug, Serialize, Deserialize, Default)]
+#[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct FollowSaved {
     pub leader_ip: String,
     pub follower_ip: String,
@@ -45,22 +47,32 @@ pub struct FollowSaved {
     pub tilt_offset: i32,
 }
 
-fn saved_path() -> std::path::PathBuf {
-    std::path::PathBuf::from("fomako-follow.json")
+fn saved_paths() -> Vec<std::path::PathBuf> {
+    let cwd = std::path::PathBuf::from("fomako-follow.json");
+    let exe = std::env::current_exe()
+        .ok()
+        .and_then(|p| p.parent().map(|d| d.join("fomako-follow.json")));
+    match exe {
+        Some(exe) if exe != cwd => vec![cwd, exe],
+        _ => vec![cwd],
+    }
 }
 
 pub fn load_saved() -> Option<FollowSaved> {
-    let text = std::fs::read_to_string(saved_path()).ok()?;
-    serde_json::from_str(&text).ok()
+    for path in saved_paths() {
+        if let Ok(text) = std::fs::read_to_string(&path) {
+            if let Ok(saved) = serde_json::from_str::<FollowSaved>(&text) {
+                return Some(saved);
+            }
+        }
+    }
+    None
 }
 
 pub fn save(saved: &FollowSaved) {
     if let Ok(text) = serde_json::to_string_pretty(saved) {
-        let _ = std::fs::write(saved_path(), &text);
-        if let Ok(exe) = std::env::current_exe() {
-            if let Some(dir) = exe.parent() {
-                let _ = std::fs::write(dir.join("fomako-follow.json"), text);
-            }
+        for path in saved_paths() {
+            let _ = std::fs::write(path, &text);
         }
     }
 }
@@ -88,34 +100,29 @@ pub fn query_pos(cam: &CameraConfig) -> Result<(u16, u16), String> {
     })
 }
 
-#[cfg(target_arch = "wasm32")]
-pub fn query_pos(_cam: &CameraConfig) -> Result<(u16, u16), String> {
-    Err("cross-camera follow needs the desktop app".to_string())
+/// Offset that maps leader aim to follower aim at one shared point.
+pub fn offset_from(
+    leader: (u16, u16),
+    follower: (u16, u16),
+) -> (i32, i32) {
+    (
+        follower.0 as i32 - leader.0 as i32,
+        follower.1 as i32 - leader.1 as i32,
+    )
 }
 
-/// Offset that maps leader aim to follower aim at one shared point.
 #[cfg(not(target_arch = "wasm32"))]
 pub fn calibrate(leader: &CameraConfig, follower: &CameraConfig) -> Result<(i32, i32), String> {
     if leader.ip == follower.ip {
         return Err("pick two different cameras".to_string());
     }
-    let (lp, lt) = query_pos(leader)?;
-    let (fp, ft) = query_pos(follower)?;
-    Ok((fp as i32 - lp as i32, ft as i32 - lt as i32))
-}
-
-#[cfg(target_arch = "wasm32")]
-pub fn calibrate(_leader: &CameraConfig, _follower: &CameraConfig) -> Result<(i32, i32), String> {
-    Err("cross-camera follow needs the desktop app".to_string())
+    let leader_pos = query_pos(leader)?;
+    let follower_pos = query_pos(follower)?;
+    Ok(offset_from(leader_pos, follower_pos))
 }
 
 /// Map a leader position through the calibrated offset, clamped to the range.
-pub fn mapped_target(
-    leader_pan: u16,
-    leader_tilt: u16,
-    pan_offset: i32,
-    tilt_offset: i32,
-) -> (u16, u16) {
+pub fn mapped_target(leader_pan: u16, leader_tilt: u16, pan_offset: i32, tilt_offset: i32) -> (u16, u16) {
     let pan = (leader_pan as i32 + pan_offset).clamp(0, POS_MAX) as u16;
     let tilt = (leader_tilt as i32 + tilt_offset).clamp(0, POS_MAX) as u16;
     (pan, tilt)
@@ -141,7 +148,7 @@ pub struct FollowSpec {
     pub tilt_speed: u8,
 }
 
-/// Start the follow loop. Bumping `gen` (or dropping the app) stops it.
+/// Start the follow loop. Bumping `gen`, or process exit, stops it.
 #[cfg(not(target_arch = "wasm32"))]
 pub fn start(
     spec: FollowSpec,
@@ -153,11 +160,17 @@ pub fn start(
     std::thread::spawn(move || {
         let mut last_sent: Option<(u16, u16)> = None;
         let mut last_note = String::new();
-        let mut last_error = String::new();
+        let mut last_leader_error = String::new();
+        let mut last_follower_error = String::new();
         while current.load(Ordering::SeqCst) == gen {
             match query_pos(&spec.leader) {
                 Ok((lp, lt)) => {
-                    let target = mapped_target(lp, lt, spec.pan_offset, spec.tilt_offset);
+                    if current.load(Ordering::SeqCst) != gen {
+                        break;
+                    }
+                    last_leader_error.clear();
+                    let target =
+                        mapped_target(lp, lt, spec.pan_offset, spec.tilt_offset);
                     if needs_move(last_sent, target) {
                         let (protocol, port) = proto(&spec.follower);
                         let payload = visca::pan_tilt_absolute(
@@ -167,32 +180,34 @@ pub fn start(
                             target.0,
                             target.1,
                         );
-                        if let Err(error) =
-                            visca::send_only(&spec.follower.ip, port, protocol, &payload)
+                        if current.load(Ordering::SeqCst) != gen {
+                            break;
+                        }
+                        if let Err(error) = visca::send_only(&spec.follower.ip, port, protocol, &payload)
                         {
                             let note = format!("{}: {}", spec.follower.name, error);
-                            if note != last_error {
-                                last_error = note.clone();
+                            if note != last_follower_error {
+                                last_follower_error = note.clone();
                                 emit(&slot, &wake, FollowEvent::Error(note));
                             }
                         } else {
                             last_sent = Some(target);
-                            last_error.clear();
+                            last_follower_error.clear();
                         }
                     }
-                    let note = format!(
-                        "{} → {}  ·  aim {:#06x}/{:#06x}",
-                        spec.leader.name, spec.follower.name, target.0, target.1
-                    );
+                    let note = format!("Following — {} drives {}", spec.leader.name, spec.follower.name);
                     if note != last_note {
                         last_note = note.clone();
                         emit(&slot, &wake, FollowEvent::Status(note));
                     }
                 }
                 Err(error) => {
+                    if current.load(Ordering::SeqCst) != gen {
+                        break;
+                    }
                     let note = format!("{}: {}", spec.leader.name, error);
-                    if note != last_error {
-                        last_error = note.clone();
+                    if note != last_leader_error {
+                        last_leader_error = note.clone();
                         emit(&slot, &wake, FollowEvent::Error(note));
                     }
                 }
@@ -202,18 +217,12 @@ pub fn start(
     });
 }
 
-#[cfg(target_arch = "wasm32")]
-pub fn start(
-    _spec: FollowSpec,
-    _gen: u64,
-    _current: Arc<AtomicU64>,
-    _slot: Arc<Mutex<Option<FollowEvent>>>,
-    _wake: Option<rune::Waker>,
-) {
-}
-
 #[cfg(not(target_arch = "wasm32"))]
-fn emit(slot: &Arc<Mutex<Option<FollowEvent>>>, wake: &Option<rune::Waker>, event: FollowEvent) {
+fn emit(
+    slot: &Arc<Mutex<Option<FollowEvent>>>,
+    wake: &Option<rune::Waker>,
+    event: FollowEvent,
+) {
     if let Ok(mut s) = slot.lock() {
         *s = Some(event);
     }
@@ -243,6 +252,11 @@ mod tests {
         assert_eq!(mapped_target(1000, 2000, 100, -500), (1100, 1500));
         assert_eq!(mapped_target(10, 10, -100, -100), (0, 0));
         assert_eq!(mapped_target(0xFFF0, 0xFFF0, 100, 100), (0xFFFF, 0xFFFF));
+    }
+
+    #[test]
+    fn calibration_offset_is_follower_minus_leader() {
+        assert_eq!(offset_from((1000, 2000), (900, 2100)), (-100, 100));
     }
 
     #[test]

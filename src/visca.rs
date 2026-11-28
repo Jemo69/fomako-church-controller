@@ -121,7 +121,12 @@ pub fn parse_pan_tilt_pos(reply: &[u8]) -> Option<(u16, u16)> {
     } else {
         reply
     };
-    if payload.len() < 10 || payload[1] != 0x50 {
+    if payload.len() < 11
+        || payload[0] & 0x0F != 0
+        || payload[0] & 0x80 == 0
+        || payload[1] != 0x50
+        || payload[10] != 0xFF
+    {
         return None;
     }
     let mut pan = 0u16;
@@ -450,9 +455,15 @@ pub fn send_blocking(ip: &str, port: u16, protocol: Protocol, payload: &[u8]) ->
     }
 }
 
-/// Fire a command without waiting for ACK/completion. Used by the follow loop,
-/// where a camera's `90 41` ACK must not be mistaken for a rejection.
+/// Send a command and wait briefly for an ACK/completion. `90 41` is a normal
+/// ACK (not a rejection); `90 6x` is the only error that is reported.
 pub fn send_only(ip: &str, port: u16, protocol: Protocol, payload: &[u8]) -> Result<(), String> {
+    fn check(body: &[u8]) -> Result<(), String> {
+        if body.len() >= 2 && body[0] & 0x0F == 0 && body[0] & 0x80 != 0 && body[1] & 0xF0 == 0x60 {
+            return Err(format!("camera error ({})", hex(body)));
+        }
+        Ok(())
+    }
     match protocol {
         Protocol::SonyUdp => {
             let seq = SEQ.fetch_add(1, Ordering::SeqCst);
@@ -461,13 +472,21 @@ pub fn send_only(ip: &str, port: u16, protocol: Protocol, payload: &[u8]) -> Res
             let sock = UdpSocket::bind(local).map_err(|e| format!("udp bind: {e}"))?;
             sock.set_write_timeout(Some(Duration::from_millis(800)))
                 .map_err(|e| format!("timeout: {e}"))?;
+            sock.set_read_timeout(Some(Duration::from_millis(120)))
+                .map_err(|e| format!("timeout: {e}"))?;
             let target = format!("{}:{}", ip, port);
             sock.send_to(&packet, &target)
                 .map_err(|e| format!("send {}: {e}", target))?;
+            let mut buf = [0u8; 128];
+            if let Ok((n, _)) = sock.recv_from(&mut buf) {
+                let reply = &buf[..n];
+                let body = if reply.len() >= 8 && reply[..2] == [0x01, 0x00] { &reply[8..] } else { reply };
+                check(body)?;
+            }
             Ok(())
         }
         Protocol::IpViscaTcp => {
-            use std::io::Write;
+            use std::io::{Read, Write};
             let target = format!("{}:{}", ip, port);
             let mut stream = TcpStream::connect_timeout(
                 &target.to_socket_addrs_one()?,
@@ -478,8 +497,15 @@ pub fn send_only(ip: &str, port: u16, protocol: Protocol, payload: &[u8]) -> Res
                 .set_write_timeout(Some(Duration::from_millis(800)))
                 .map_err(|e| format!("timeout: {e}"))?;
             stream
+                .set_read_timeout(Some(Duration::from_millis(120)))
+                .map_err(|e| format!("timeout: {e}"))?;
+            stream
                 .write_all(payload)
                 .map_err(|e| format!("write: {e}"))?;
+            let mut buf = [0u8; 128];
+            if let Ok(n) = stream.read(&mut buf) {
+                check(&buf[..n])?;
+            }
             Ok(())
         }
     }
@@ -510,8 +536,13 @@ pub fn query_blocking(ip: &str, port: u16, protocol: Protocol, payload: &[u8]) -
                         } else {
                             reply
                         };
-                        if body.len() >= 2 && body[0] == 0x90 && body[1] == 0x50 {
-                            return Ok(reply.to_vec());
+                        if body.len() >= 2 && body[0] & 0x0F == 0 && body[0] & 0x80 != 0 {
+                            if body[1] == 0x50 {
+                                return Ok(reply.to_vec());
+                            }
+                            if body[1] & 0xF0 == 0x60 {
+                                return Err(format!("camera error ({})", hex(body)));
+                            }
                         }
                         // 90 41 is ACK; keep reading for the 90 50 reply.
                     }
@@ -537,25 +568,34 @@ pub fn query_blocking(ip: &str, port: u16, protocol: Protocol, payload: &[u8]) -
             stream
                 .write_all(payload)
                 .map_err(|e| format!("write: {e}"))?;
-            let mut reply = Vec::new();
+            let mut pending = Vec::new();
             let mut buf = [0u8; 128];
-            while reply.len() < 64 {
+            loop {
                 match stream.read(&mut buf) {
                     Ok(0) => break,
                     Ok(n) => {
-                        reply.extend_from_slice(&buf[..n]);
-                        if reply.contains(&0xFF) {
-                            return Ok(reply);
+                        pending.extend_from_slice(&buf[..n]);
+                        while let Some(end) = pending.iter().position(|&b| b == 0xFF) {
+                            let frame: Vec<u8> = pending.drain(..=end).collect();
+                            let body = if frame.len() >= 10 && frame[..2] == [0x01, 0x00] {
+                                &frame[8..]
+                            } else {
+                                &frame[..]
+                            };
+                            if body.len() >= 2 && body[0] & 0x0F == 0 && body[0] & 0x80 != 0 {
+                                if body[1] == 0x50 {
+                                    return Ok(frame);
+                                }
+                                if body[1] & 0xF0 == 0x60 {
+                                    return Err(format!("camera error ({})", hex(body)));
+                                }
+                            }
                         }
                     }
                     Err(_) => break,
                 }
             }
-            if reply.is_empty() {
-                Err("no reply (camera did not answer the position inquiry)".to_string())
-            } else {
-                Ok(reply)
-            }
+            Err("no reply (camera did not answer the position inquiry)".to_string())
         }
     }
 }
@@ -631,6 +671,44 @@ mod tests {
         assert_eq!(parse_pan_tilt_pos(&framed), Some((0x1234, 0x0ABC)));
         framed[9] = 0x41;
         assert_eq!(parse_pan_tilt_pos(&framed), None);
+    }
+
+    #[test]
+    fn inquiry_accepts_a_non_first_camera_address() {
+        let camera = UdpSocket::bind("127.0.0.1:0").expect("bind fake camera");
+        let port = camera.local_addr().unwrap().port();
+        std::thread::spawn(move || {
+            let mut packet = [0u8; 128];
+            let (_, source) = camera.recv_from(&mut packet).expect("receive inquiry");
+            let reply = sony_encapsulate(
+                &[0xA0, 0x50, 0x01, 0x02, 0x03, 0x04, 0x00, 0x0A, 0x0B, 0x0C, 0xFF],
+                3,
+            );
+            camera.send_to(&reply, source).unwrap();
+        });
+        let bytes = query_blocking("127.0.0.1", port, Protocol::SonyUdp, &pan_tilt_pos_inq(2))
+            .expect("camera 2 reply");
+        assert_eq!(parse_pan_tilt_pos(&bytes), Some((0x1234, 0x0ABC)));
+    }
+
+    #[test]
+    fn tcp_inquiry_skips_ack_and_handles_split_frames() {
+        use std::io::{Read, Write};
+        let listener = std::net::TcpListener::bind("127.0.0.1:0").expect("bind fake camera");
+        let port = listener.local_addr().unwrap().port();
+        std::thread::spawn(move || {
+            let (mut stream, _) = listener.accept().unwrap();
+            let mut packet = [0u8; 128];
+            let _ = stream.read(&mut packet).unwrap();
+            stream.write_all(&[0x90, 0x41, 0xFF]).unwrap();
+            stream.write_all(&[0x90, 0x50, 0x01, 0x02]).unwrap();
+            stream
+                .write_all(&[0x03, 0x04, 0x00, 0x0A, 0x0B, 0x0C, 0xFF])
+                .unwrap();
+        });
+        let bytes = query_blocking("127.0.0.1", port, Protocol::IpViscaTcp, &pan_tilt_pos_inq(1))
+            .expect("TCP position reply");
+        assert_eq!(parse_pan_tilt_pos(&bytes), Some((0x1234, 0x0ABC)));
     }
 
     #[test]

@@ -444,7 +444,7 @@ fn follow_card(s: &App, t: rune::tok::Theme, dark: bool, _touch: bool, bh: f32) 
     }
 
     let mut leader_row = row().key("follow-leader").w_full().gap(6.0).center_y().flex_wrap()
-        .child(text("Leader (AI tracking):".to_owned()).font(type_::LABEL).color(t.text_secondary));
+        .child(text("Leader (AI tracking):".to_owned()).font(type_::LABEL).color(t.text_secondary).min_w(150.0));
     for (i, name) in names.iter().enumerate() {
         let on = i == s.follow_leader;
         leader_row = leader_row.child(
@@ -469,7 +469,7 @@ fn follow_card(s: &App, t: rune::tok::Theme, dark: bool, _touch: bool, bh: f32) 
     }
 
     let mut follower_row = row().key("follow-follower").w_full().gap(6.0).center_y().flex_wrap()
-        .child(text("Follower:".to_owned()).font(type_::LABEL).color(t.text_secondary));
+        .child(text("Follower:".to_owned()).font(type_::LABEL).color(t.text_secondary).min_w(150.0));
     for (i, name) in names.iter().enumerate() {
         let on = i == s.follow_follower;
         follower_row = follower_row.child(
@@ -494,28 +494,39 @@ fn follow_card(s: &App, t: rune::tok::Theme, dark: bool, _touch: bool, bh: f32) 
     }
 
     card = card.child(leader_row).child(follower_row);
+    // Promote Calibrate while it is the prerequisite; promote Start only when ready.
+    let calibrate = if s.follow_ready {
+        btn("Calibrate", "follow-cal", t, 112.0, bh,
+            |s: &mut App| actions::follow_calibrate(s))
+    } else {
+        accent_btn("Calibrate", "follow-cal", dark, 112.0, bh,
+            |s: &mut App| actions::follow_calibrate(s))
+    };
+    let start = if s.follow_on {
+        btn("Stop following", "follow-toggle", t, 150.0, bh,
+            |s: &mut App| actions::follow_toggle(s))
+    } else if s.follow_ready {
+        accent_btn("Start following", "follow-toggle", dark, 150.0, bh,
+            |s: &mut App| actions::follow_toggle(s))
+    } else {
+        btn("Start following", "follow-toggle", t, 150.0, bh,
+            |s: &mut App| actions::follow_toggle(s))
+    };
     card = card.child(row().w_full().gap(8.0).center_y().flex_wrap()
-        .child(btn_flex("Calibrate", "Calibrate follow from a shared landmark", "follow-cal", t, 92.0, bh,
-            |s: &mut App| actions::follow_calibrate(s)))
-        .child(if s.follow_on {
-            btn_flex("Stop following", "Stop cross-camera follow", "follow-toggle", t, 108.0, bh,
-                |s: &mut App| actions::follow_toggle(s))
-        } else {
-            accent_btn_flex("Start following", "Start cross-camera follow", "follow-toggle", dark, 108.0, bh,
-                |s: &mut App| actions::follow_toggle(s))
-        })
-        .child(text(format!("offset pan {:+#} · tilt {:+#}", s.follow_pan_offset, s.follow_tilt_offset))
+        .child(calibrate)
+        .child(start)
+        .child(text(format!("offset: pan {:+#} · tilt {:+#} steps", s.follow_pan_offset, s.follow_tilt_offset))
             .font(type_::MONO_CAPTION).color(t.text_secondary)));
     card.child(row().w_full().gap(6.0).center_y().flex_wrap()
-        .child(text("Nudge offset:".to_owned()).font(type_::LABEL).color(t.text_secondary))
-        .child(btn_flex("Pan −", "Nudge pan offset down", "follow-pan-minus", t, 64.0, bh,
-            |s: &mut App| actions::follow_adjust(s, -10, 0)))
-        .child(btn_flex("Pan +", "Nudge pan offset up", "follow-pan-plus", t, 64.0, bh,
-            |s: &mut App| actions::follow_adjust(s, 10, 0)))
-        .child(btn_flex("Tilt −", "Nudge tilt offset down", "follow-tilt-minus", t, 64.0, bh,
-            |s: &mut App| actions::follow_adjust(s, 0, -10)))
-        .child(btn_flex("Tilt +", "Nudge tilt offset up", "follow-tilt-plus", t, 64.0, bh,
-            |s: &mut App| actions::follow_adjust(s, 0, 10))))
+        .child(text("Nudge (screen direction):".to_owned()).font(type_::LABEL).color(t.text_secondary))
+        .child(btn("Pan ◄", "follow-pan-minus", t, 78.0, bh,
+            |s: &mut App| actions::follow_adjust(s, -100, 0)))
+        .child(btn("Pan ►", "follow-pan-plus", t, 78.0, bh,
+            |s: &mut App| actions::follow_adjust(s, 100, 0)))
+        .child(btn("Tilt ▲", "follow-tilt-minus", t, 78.0, bh,
+            |s: &mut App| actions::follow_adjust(s, 0, -100)))
+        .child(btn("Tilt ▼", "follow-tilt-plus", t, 78.0, bh,
+            |s: &mut App| actions::follow_adjust(s, 0, 100))))
 }
 
 fn camera_switcher(s: &App, t: rune::tok::Theme, touch: bool) -> El {
@@ -951,8 +962,17 @@ fn camera_list(s: &App, t: rune::tok::Theme, touch: bool) -> El {
         c = c.child(row().gap(8.0)
             .child(btn("Remove selected", "cam-remove", t, 148.0, if touch { 42.0 } else { 30.0 }, |s: &mut App| {
                 if s.cameras.len() > 1 {
+                    actions::follow_stop(s);
+                    s.follow_ready = false;
                     s.cameras.remove(s.selected);
                     s.select_camera(0);
+                    s.selected = 0;
+                    let last = s.cameras.len() - 1;
+                    s.follow_leader = s.follow_leader.min(last);
+                    s.follow_follower = s.follow_follower.min(last);
+                    if s.follow_leader == s.follow_follower {
+                        s.follow_follower = if s.follow_leader == 0 && last > 0 { 1 } else { 0 };
+                    }
                     s.save();
                     s.set_status("Camera removed".into());
                 }

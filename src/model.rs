@@ -408,6 +408,12 @@ impl App {
         {
             s.look_files = crate::look::list_pictures("looks");
         }
+        if s.follow_ready {
+            s.follow_status = format!(
+                "Ready — saved offset pan {:+#}, tilt {:+#} steps. Start when ready.",
+                s.follow_pan_offset, s.follow_tilt_offset
+            );
+        }
         s.push_log("FoMaKo controller started (VISCA 52381 / 5678, admin/admin)".into());
         s
     }
@@ -549,7 +555,7 @@ impl App {
         let event = self.follow_slot.lock().ok().and_then(|mut s| s.take());
         match event {
             Some(crate::follow::FollowEvent::Status(msg)) => {
-                if self.follow_status == msg {
+                if !self.follow_on || self.follow_status == msg {
                     false
                 } else {
                     self.follow_status = msg;
@@ -557,6 +563,9 @@ impl App {
                 }
             }
             Some(crate::follow::FollowEvent::Error(msg)) => {
+                if !self.follow_on {
+                    return false;
+                }
                 let text = format!("follow error — {}", msg);
                 if self.follow_status == text {
                     false
@@ -566,8 +575,49 @@ impl App {
                     true
                 }
             }
+            Some(crate::follow::FollowEvent::Calibrated { gen, pan, tilt }) => {
+                if gen != self.follow_gen.load(std::sync::atomic::Ordering::SeqCst) {
+                    return false;
+                }
+                self.follow_pan_offset = pan;
+                self.follow_tilt_offset = tilt;
+                self.follow_ready = true;
+                self.follow_status = format!(
+                    "Calibrated — offset pan {:+#}, tilt {:+#} steps. Start when ready.",
+                    pan, tilt
+                );
+                self.push_log(format!("Follow calibrated: pan {:+} tilt {:+}", pan, tilt));
+                self.save_follow_offsets();
+                true
+            }
+            Some(crate::follow::FollowEvent::CalibrationError { gen, msg }) => {
+                if gen != self.follow_gen.load(std::sync::atomic::Ordering::SeqCst) {
+                    return false;
+                }
+                self.follow_ready = false;
+                self.follow_status = format!("Calibration failed — {}", msg);
+                self.push_log(format!("Follow calibration failed: {}", msg));
+                true
+            }
             None => false,
         }
+    }
+
+    fn save_follow_offsets(&self) {
+        if self.cameras.len() < 2 {
+            return;
+        }
+        let l = self.follow_leader.min(self.cameras.len() - 1);
+        let f = self.follow_follower.min(self.cameras.len() - 1);
+        if l == f {
+            return;
+        }
+        crate::follow::save(&crate::follow::FollowSaved {
+            leader_ip: self.cameras[l].ip.clone(),
+            follower_ip: self.cameras[f].ip.clone(),
+            pan_offset: self.follow_pan_offset,
+            tilt_offset: self.follow_tilt_offset,
+        });
     }
 
     #[cfg(test)]
