@@ -4,6 +4,9 @@ use std::sync::{Arc, Mutex};
 use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 
 use crate::discover::{self, ScanEvent, ScanHandle};
+use crate::follow;
+#[cfg(not(target_arch = "wasm32"))]
+use crate::follow::{FollowEvent, FollowSpec};
 use crate::model::{App, ScanState};
 #[cfg(target_arch = "wasm32")]
 use crate::model::ActionReply;
@@ -21,6 +24,10 @@ fn relay_proto(app: &App) -> (&'static str, u16) {
 }
 
 fn send(app: &mut App, what: &str, payload: Vec<u8>) {
+    if app.follow_on && app.selected == app.follow_follower {
+        app.set_status("Follower is driven by cross-camera follow — stop following first.".into());
+        return;
+    }
     let cam = app.current().clone();
     let hex = visca::hex(&payload);
     if app.use_relay && !app.relay_url.text.trim().is_empty() {
@@ -151,12 +158,20 @@ pub fn apply_tracking(app: &mut App) {
 }
 
 pub fn toggle_tracking(app: &mut App) {
+    if app.follow_on && app.selected == app.follow_follower {
+        app.set_status("Stop cross-camera follow before changing the follower's tracking.".into());
+        return;
+    }
     app.track_on = !app.track_on;
     apply_tracking(app);
 }
 
 /// Switch mode and turn tracking on (mode only applies while tracking runs).
 pub fn set_tracking_mode(app: &mut App, area: bool) {
+    if app.follow_on && app.selected == app.follow_follower {
+        app.set_status("Stop cross-camera follow before changing the follower's tracking.".into());
+        return;
+    }
     app.track_area = area;
     app.track_on = true;
     apply_tracking(app);
@@ -165,6 +180,10 @@ pub fn set_tracking_mode(app: &mut App, area: bool) {
 /// Switch to the next person (F4 on the IR remote; not in the VISCA manual,
 /// so this only stops and restarts tracking, which makes the camera re-acquire).
 pub fn tracking_next_target(app: &mut App) {
+    if app.follow_on && app.selected == app.follow_follower {
+        app.set_status("Stop cross-camera follow before changing the follower's tracking.".into());
+        return;
+    }
     if !app.track_on {
         app.set_status("AI Tracking: turn tracking on first".into());
         return;
@@ -574,6 +593,169 @@ pub fn poll_look(app: &mut App, clock: f64) -> bool {
     }
     match_look(app);
     true
+}
+
+// ---------------------------------------------------------------- cross-camera follow
+
+fn follow_pair(app: &App) -> Option<(usize, usize)> {
+    if app.cameras.len() < 2 {
+        return None;
+    }
+    let l = app.follow_leader.min(app.cameras.len() - 1);
+    let f = app.follow_follower.min(app.cameras.len() - 1);
+    (l != f && app.cameras[l].ip != app.cameras[f].ip).then_some((l, f))
+}
+
+pub fn follow_stop(app: &mut App) {
+    app.follow_gen.fetch_add(1, Ordering::SeqCst);
+    if let Ok(mut slot) = app.follow_slot.lock() {
+        slot.clear();
+    }
+    if app.follow_on {
+        app.follow_status = "Stopped — leader aim is no longer sent to the follower.".to_string();
+        if app.selected == app.follow_follower {
+            app.track_on = false;
+            app.track_status = "Off — camera aims manually".to_string();
+        }
+    }
+    app.follow_on = false;
+}
+
+pub fn follow_toggle(app: &mut App) {
+    if app.follow_on {
+        follow_stop(app);
+    } else {
+        follow_start(app);
+    }
+}
+
+fn follow_start(app: &mut App) {
+    let Some((l, f)) = follow_pair(app) else {
+        app.follow_status = "Pick two different cameras (different IPs) first.".to_string();
+        return;
+    };
+    if !app.follow_ready {
+        app.follow_status =
+            "Calibrate both cameras on one shared landmark first (Start uses the saved offset).".to_string();
+        return;
+    }
+    #[cfg(target_arch = "wasm32")]
+    {
+        let _ = (l, f);
+        app.follow_status = "Cross-camera follow needs the desktop app (camera sockets).".to_string();
+        return;
+    }
+    #[cfg(not(target_arch = "wasm32"))]
+    {
+        if app.selected == f && app.track_on {
+            app.track_on = false;
+            app.track_status = "Off — driven by cross-camera follow".to_string();
+        }
+        let leader = app.cameras[l].clone();
+        let follower = app.cameras[f].clone();
+        let spec = FollowSpec {
+            leader: leader.clone(),
+            follower: follower.clone(),
+            pan_offset: app.follow_pan_offset,
+            tilt_offset: app.follow_tilt_offset,
+            pan_speed: app.pan_speed,
+            tilt_speed: app.tilt_speed,
+        };
+        app.follow_gen.fetch_add(1, Ordering::SeqCst);
+        let gen = app.follow_gen.load(Ordering::SeqCst);
+        follow::start(
+            spec,
+            gen,
+            app.follow_gen.clone(),
+            app.follow_slot.clone(),
+            app.follow_waker.clone(),
+        );
+        app.follow_on = true;
+        app.follow_status = follow::following_note(&leader.name, &follower.name);
+        if let Err(error) = follow::save_pair(
+            &app.cameras,
+            l,
+            f,
+            app.follow_pan_offset,
+            app.follow_tilt_offset,
+        ) {
+            app.push_log(format!("Follow offset not saved: {}", error));
+        }
+    }
+}
+
+/// Point both cameras at one landmark first, then calibrate.
+pub fn follow_calibrate(app: &mut App) {
+    follow_stop(app);
+    let Some((l, f)) = follow_pair(app) else {
+        app.follow_status = "Pick two different cameras (different IPs) first.".to_string();
+        return;
+    };
+    app.follow_ready = false;
+    app.follow_status = "Calibrating — keep both cameras on the shared landmark…".to_string();
+    #[cfg(target_arch = "wasm32")]
+    {
+        let _ = (l, f);
+        app.follow_status = "Cross-camera follow needs the desktop app (camera sockets).".to_string();
+    }
+    #[cfg(not(target_arch = "wasm32"))]
+    {
+        if app.selected == f && app.track_on {
+            app.track_on = false;
+            app.track_status = "Off — driven by cross-camera follow".to_string();
+        }
+        let leader = app.cameras[l].clone();
+        let follower = app.cameras[f].clone();
+        let slot = app.follow_slot.clone();
+        let wake = app.follow_waker.clone();
+        let gen = app.follow_gen.load(Ordering::SeqCst);
+        // Two camera round-trips can take seconds on an unreachable TCP camera;
+        // keep the UI thread free and report through the follow slot.
+        std::thread::spawn(move || {
+            let event = match follow::calibrate(&leader, &follower) {
+                Ok((pan, tilt)) => FollowEvent::Calibrated { gen, pan, tilt },
+                Err(msg) => FollowEvent::CalibrationError { gen, msg },
+            };
+            if let Ok(mut s) = slot.lock() {
+                s.push(event);
+            }
+            if let Some(w) = wake {
+                w();
+            }
+        });
+    }
+}
+
+pub fn follow_adjust(app: &mut App, pan_delta: i32, tilt_delta: i32) {
+    if !app.follow_ready {
+        app.follow_status =
+            "Calibrate both cameras on one shared landmark before nudging the offset.".to_string();
+        return;
+    }
+    let was_running = app.follow_on;
+    app.follow_pan_offset = (app.follow_pan_offset + pan_delta).clamp(follow::OFFSET_MIN, follow::OFFSET_MAX);
+    app.follow_tilt_offset = (app.follow_tilt_offset + tilt_delta).clamp(follow::OFFSET_MIN, follow::OFFSET_MAX);
+    if was_running {
+        // Restart the loop so the new offset takes effect now.
+        follow_stop(app);
+        follow_start(app);
+    } else {
+        app.follow_status = format!(
+            "Offset pan {:+}, tilt {:+} steps — fine-tune while following.",
+            app.follow_pan_offset, app.follow_tilt_offset
+        );
+        if let Some((l, f)) = follow_pair(app) {
+            if let Err(error) = follow::save_pair(
+                &app.cameras,
+                l,
+                f,
+                app.follow_pan_offset,
+                app.follow_tilt_offset,
+            ) {
+                app.push_log(format!("Follow offset not saved: {}", error));
+            }
+        }
+    }
 }
 
 #[cfg(target_arch = "wasm32")]

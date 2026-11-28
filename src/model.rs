@@ -234,6 +234,18 @@ pub struct App {
     pub update_next_check: f64,
     pub update_slot: Arc<Mutex<Vec<UpdateEvent>>>,
     pub update_waker: Option<rune::Waker>,
+
+    // Cross-camera follow: leader aim → follower pan/tilt (src/follow.rs).
+    pub follow_on: bool,
+    pub follow_leader: usize,
+    pub follow_follower: usize,
+    pub follow_pan_offset: i32,
+    pub follow_tilt_offset: i32,
+    pub follow_status: String,
+    pub follow_ready: bool,
+    pub follow_gen: Arc<AtomicU64>,
+    pub follow_slot: Arc<Mutex<Vec<crate::follow::FollowEvent>>>,
+    pub follow_waker: Option<rune::Waker>,
 }
 
 #[derive(Clone, Debug)]
@@ -265,6 +277,24 @@ pub struct ScanState {
 impl App {
     pub fn new() -> Self {
         let cameras = load_cameras();
+        let saved = crate::follow::load_saved();
+        let (follow_leader, follow_follower, follow_pan_offset, follow_tilt_offset, follow_ready) = match &saved {
+            Some(sv) if cameras.len() > 1 => {
+                let leader = cameras.iter().position(|c| c.ip == sv.leader_ip);
+                let follower = cameras.iter().position(|c| c.ip == sv.follower_ip);
+                match (leader, follower) {
+                    (Some(l), Some(f)) if l != f => (
+                        l,
+                        f,
+                        sv.pan_offset.clamp(crate::follow::OFFSET_MIN, crate::follow::OFFSET_MAX),
+                        sv.tilt_offset.clamp(crate::follow::OFFSET_MIN, crate::follow::OFFSET_MAX),
+                        true,
+                    ),
+                    _ => (0, 1, 0, 0, false),
+                }
+            }
+            _ => (0, if cameras.len() > 1 { 1 } else { 0 }, 0, 0, false),
+        };
         let mut s = App {
             cameras,
             selected: 0,
@@ -366,6 +396,16 @@ impl App {
             update_next_check: 4.0,
             update_slot: Arc::new(Mutex::new(Vec::new())),
             update_waker: None,
+            follow_on: false,
+            follow_leader,
+            follow_follower,
+            follow_pan_offset,
+            follow_tilt_offset,
+            follow_status: "Idle — calibrate both cameras on one landmark, then Start.".to_string(),
+            follow_ready,
+            follow_gen: Arc::new(AtomicU64::new(0)),
+            follow_slot: Arc::new(Mutex::new(Vec::new())),
+            follow_waker: None,
         };
         if s.cameras.is_empty() {
             s.cameras.push(CameraConfig::default());
@@ -373,6 +413,12 @@ impl App {
         #[cfg(not(target_arch = "wasm32"))]
         {
             s.look_files = crate::look::list_pictures("looks");
+        }
+        if s.follow_ready {
+            s.follow_status = format!(
+                "Ready — saved offset pan {:+}, tilt {:+} steps. Start when ready.",
+                s.follow_pan_offset, s.follow_tilt_offset
+            );
         }
         s.push_log("FoMaKo controller started (VISCA 52381 / 5678, admin/admin)".into());
         s
@@ -387,7 +433,11 @@ impl App {
     pub fn select_camera(&mut self, i: usize) {
         self.selected = i.min(self.cameras.len().saturating_sub(1));
         self.track_on = false;
-        self.track_status = "Off — camera aims manually".to_string();
+        self.track_status = if self.follow_on && self.selected == self.follow_follower {
+            "Off — driven by cross-camera follow".to_string()
+        } else {
+            "Off — camera aims manually".to_string()
+        };
     }
 
     pub fn push_log(&mut self, msg: String) {
@@ -510,6 +560,86 @@ impl App {
         changed
     }
 
+    /// Drain follow-loop updates; call from AppSpec::poll. True when changed.
+    pub fn follow_poll(&mut self) -> bool {
+        let events = self
+            .follow_slot
+            .lock()
+            .map(|mut s| std::mem::take(&mut *s))
+            .unwrap_or_default();
+        if events.is_empty() {
+            return false;
+        }
+        let gen = self.follow_gen.load(std::sync::atomic::Ordering::SeqCst);
+        let mut changed = false;
+        for event in events {
+            match event {
+                crate::follow::FollowEvent::Status { gen: g, msg } => {
+                    if g != gen || !self.follow_on || self.follow_status == msg {
+                        continue;
+                    }
+                    self.follow_status = msg;
+                    changed = true;
+                }
+                crate::follow::FollowEvent::Error { gen: g, msg } => {
+                    if g != gen || !self.follow_on {
+                        continue;
+                    }
+                    let text = format!("follow error — {}", msg);
+                    if self.follow_status != text {
+                        self.follow_status = text.clone();
+                        self.push_log(text);
+                        changed = true;
+                    }
+                }
+                crate::follow::FollowEvent::Calibrated { gen: g, pan, tilt } => {
+                    if g != gen {
+                        continue;
+                    }
+                    self.follow_pan_offset = pan;
+                    self.follow_tilt_offset = tilt;
+                    self.follow_ready = true;
+                    let saved = self.save_follow_offsets();
+                    self.follow_status = match saved {
+                        Ok(()) => format!(
+                            "Calibrated — offset pan {:+}, tilt {:+} steps. Start when ready.",
+                            pan, tilt
+                        ),
+                        Err(error) => format!(
+                            "Calibrated, but could not save the offset: {}",
+                            error
+                        ),
+                    };
+                    self.push_log(format!("Follow calibrated: pan {:+} tilt {:+}", pan, tilt));
+                    changed = true;
+                }
+                crate::follow::FollowEvent::CalibrationError { gen: g, msg } => {
+                    if g != gen {
+                        continue;
+                    }
+                    self.follow_ready = false;
+                    self.follow_status = format!("Calibration failed — {}", msg);
+                    self.push_log(format!("Follow calibration failed: {}", msg));
+                    changed = true;
+                }
+            }
+        }
+        changed
+    }
+
+    fn save_follow_offsets(&self) -> Result<(), String> {
+        if self.cameras.len() < 2 {
+            return Err("add a second camera first".to_string());
+        }
+        crate::follow::save_pair(
+            &self.cameras,
+            self.follow_leader.min(self.cameras.len() - 1),
+            self.follow_follower.min(self.cameras.len() - 1),
+            self.follow_pan_offset,
+            self.follow_tilt_offset,
+        )
+    }
+
     #[cfg(test)]
     pub fn with_test_runtime() -> rune::Runtime<App> {
         Self::with_test_runtime_sized((1120.0, 720.0))
@@ -595,5 +725,58 @@ fn save_cameras(cams: &[CameraConfig]) {
         let _ = std::fs::write(config_path(), j);
         // also try exe dir (may fail without perms; ignore)
         let _ = std::fs::write(exe_dir_file(), serde_json::to_string_pretty(cams).unwrap_or_default());
+    }
+}
+
+#[cfg(test)]
+mod follow_tests {
+    use super::*;
+
+    #[test]
+    fn stale_calibration_is_ignored() {
+        let mut app = App::new();
+        app.follow_ready = false;
+        app.follow_on = true;
+        let gen = app.follow_gen.load(std::sync::atomic::Ordering::SeqCst);
+        app.follow_slot
+            .lock()
+            .unwrap()
+            .push(crate::follow::FollowEvent::Calibrated {
+                gen: gen.wrapping_sub(1),
+                pan: 111,
+                tilt: 222,
+            });
+        assert!(!app.follow_poll());
+        assert!(!app.follow_ready);
+        assert_ne!(app.follow_pan_offset, 111);
+    }
+
+    #[test]
+    fn follower_tracking_guard_blocks_toggle_while_following() {
+        let mut app = App::new();
+        app.follow_on = true;
+        app.follow_follower = 0;
+        app.selected = 0;
+        app.track_on = true;
+        crate::actions::toggle_tracking(&mut app);
+        assert!(app.track_on);
+        assert!(app.status.contains("Stop cross-camera follow"), "{}", app.status);
+    }
+
+    #[test]
+    fn follow_status_event_from_an_old_thread_is_ignored() {
+        let mut app = App::new();
+        app.follow_on = true;
+        app.follow_status = "Stopped".into();
+        let gen = app.follow_gen.load(std::sync::atomic::Ordering::SeqCst);
+        app.follow_slot
+            .lock()
+            .unwrap()
+            .push(crate::follow::FollowEvent::Status {
+                gen: gen.wrapping_sub(1),
+                msg: "Following — old drives stale".into(),
+            });
+        assert!(!app.follow_poll());
+        assert_eq!(app.follow_status, "Stopped");
     }
 }

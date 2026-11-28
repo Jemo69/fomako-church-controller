@@ -12,6 +12,9 @@ pub mod android_jni;
 #[path = "discover.rs"]
 pub mod discover;
 #[cfg(not(target_os = "android"))]
+#[path = "follow.rs"]
+pub mod follow;
+#[cfg(not(target_os = "android"))]
 #[path = "look.rs"]
 pub mod look;
 #[cfg(not(target_os = "android"))]
@@ -144,6 +147,7 @@ pub fn start() {
 fn setup(s: &mut App, waker: rune::Waker) {
     s.preview_cache = Some(rune::ImageCache::new(waker.clone()));
     s.preview_waker = Some(waker.clone());
+    s.follow_waker = Some(waker.clone());
     s.action_waker = Some(waker.clone());
     s.update_waker = Some(waker);
 }
@@ -156,6 +160,7 @@ fn poll(s: &mut App, clock: f64, tx: &mut rune::Tx) -> bool {
         actions::start_scan(s, tx);
     }
     let mut changed = s.scan_poll(tx);
+    changed |= s.follow_poll();
     changed |= actions::poll_action_replies(s);
     changed |= preview::poll(s, clock, tx);
     changed |= actions::poll_look(s, clock);

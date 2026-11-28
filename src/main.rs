@@ -3,6 +3,7 @@
 
 mod actions;
 mod discover;
+mod follow;
 mod look;
 mod model;
 mod preview;
@@ -17,12 +18,14 @@ use rune::{AppSpec, Tx};
 fn setup(s: &mut App, waker: rune::Waker) {
     s.preview_cache = Some(rune::ImageCache::new(waker.clone()));
     s.preview_waker = Some(waker.clone());
+    s.follow_waker = Some(waker.clone());
     s.update_waker = Some(waker);
 }
 
 /// Drain background network-scan results + preview frames; re-arm while busy.
 fn poll(s: &mut App, clock: f64, tx: &mut Tx) -> bool {
     let mut changed = s.scan_poll(tx);
+    changed |= s.follow_poll();
     changed |= crate::preview::poll(s, clock, tx);
     changed |= crate::actions::poll_look(s, clock);
     changed |= crate::update::poll(s, clock, tx);
