@@ -321,9 +321,9 @@ fn control_page(s: &App, t: rune::tok::Theme, dark: bool, touch: bool) -> El {
     let bh = if touch { 44.0 } else { 32.0 };
     col().key("control").w_full().px(16.0).py(14.0).gap(14.0)
         .child(camera_switcher(s, t, touch))
+        .child(preview_pane(s, t, touch))
         .child(tracking_card(s, t, dark, touch))
         .child(follow_card(s, t, dark, bh))
-        .child(preview_pane(s, t, touch))
         .child(row().w_full().gap(14.0).flex_wrap()
             .child(ptz_pad(t, touch))
             .child(col().gap(10.0).grow(1.0).min_w(240.0)
@@ -964,7 +964,9 @@ fn camera_list(s: &App, t: rune::tok::Theme, touch: bool) -> El {
                 if s.cameras.len() > 1 {
                     let leader_ip = s.cameras.get(s.follow_leader).map(|c| c.ip.clone());
                     let follower_ip = s.cameras.get(s.follow_follower).map(|c| c.ip.clone());
-                    actions::follow_stop(s);
+                    if s.selected == s.follow_leader || s.selected == s.follow_follower {
+                        actions::follow_stop(s);
+                    }
                     s.cameras.remove(s.selected);
                     s.select_camera(0);
                     let last = s.cameras.len() - 1;

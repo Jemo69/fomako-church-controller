@@ -614,11 +614,6 @@ fn follow_start(app: &mut App) {
         app.follow_status = "Pick two different cameras (different IPs) first.".to_string();
         return;
     };
-    if app.selected == f && app.track_on {
-        app.follow_status =
-            "Turn the follower's own AI tracking OFF first — it ignores pan/tilt while tracking.".to_string();
-        return;
-    }
     if !app.follow_ready {
         app.follow_status =
             "Calibrate both cameras on one shared landmark first (Start uses the saved offset).".to_string();
@@ -642,17 +637,6 @@ fn follow_start(app: &mut App) {
             pan_speed: app.pan_speed,
             tilt_speed: app.tilt_speed,
         };
-        // A follower left in camera-side tracking ignores pan/tilt; turn it off.
-        let (protocol, port) = (
-            spec.follower.protocol.to_protocol(),
-            spec.follower.protocol.port(),
-        );
-        let _ = visca::send_only(
-            &spec.follower.ip,
-            port,
-            protocol,
-            &visca::tracking(spec.follower.address, false, false),
-        );
         app.follow_gen.fetch_add(1, Ordering::SeqCst);
         let gen = app.follow_gen.load(Ordering::SeqCst);
         follow::start(

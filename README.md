@@ -49,7 +49,7 @@ Real-time mode follows one person; press **F4** on the IR remote (or click their
 
 ### Cross-camera AI follow
 
-FoMaKo Gen-3 models (K20/K30/K600N/K800N, FMK/NDI `AI` models) auto-track a person inside the camera. Cross-camera subject sharing is **not** available on the hardware. The app can switch the camera's tracking on and off (§5.2, `8x 0A 01 32 …`), but the camera publishes no subject coordinates and no tracking-status query. There is nothing for camera 2 to receive except pan/tilt.
+FoMaKo AI-tracking models (FMK/K600/K630 Gen 3 and similar) auto-track a person inside the camera. Cross-camera subject sharing is **not** available on the hardware. The app can switch the camera's tracking on and off (§5.2, `8x 0A 01 32 …`), but the camera publishes no subject coordinates and no tracking-status query. There is nothing for camera 2 to receive except pan/tilt.
 
 This app therefore mirrors the leader's aim instead of sharing the subject:
 

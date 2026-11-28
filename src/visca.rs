@@ -752,6 +752,21 @@ mod tests {
     }
 
     #[test]
+    fn send_only_reports_a_tcp_camera_error() {
+        use std::io::{Read, Write};
+        let listener = std::net::TcpListener::bind("127.0.0.1:0").expect("bind fake camera");
+        let port = listener.local_addr().unwrap().port();
+        std::thread::spawn(move || {
+            let (mut stream, _) = listener.accept().unwrap();
+            let mut packet = [0u8; 128];
+            let _ = stream.read(&mut packet).unwrap();
+            stream.write_all(&[0x90, 0x60, 0x02, 0xFF]).unwrap();
+        });
+        let error = send_only("127.0.0.1", port, Protocol::IpViscaTcp, &power(1, true)).unwrap_err();
+        assert!(error.contains("camera error"), "{error}");
+    }
+
+    #[test]
     fn ack_is_success_and_error_reply_is_not() {
         let camera = UdpSocket::bind("127.0.0.1:0").expect("bind fake camera");
         let port = camera.local_addr().unwrap().port();
