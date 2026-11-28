@@ -207,10 +207,13 @@ fn statusbar(s: &App, t: rune::tok::Theme) -> El {
 /// Live camera picture (ffmpeg snapshots, or relay snapshots on web).
 /// Fixed 16:9 box so framing never distorts.
 fn preview_pane(s: &App, t: rune::tok::Theme, touch: bool) -> El {
+    #[cfg(not(target_arch = "wasm32"))]
     let live = s.preview_image.as_ref().and_then(|img| img.size().map(|_| img));
+    let has_picture = s.preview_ready;
     let bh = if touch { 42.0 } else { 28.0 };
     let mut box_el = el().key("preview-box").w_full().max_w(520.0).max_h(292.0).aspect_ratio(16.0 / 9.0).center().radius(8.0)
         .fill(t.card).border(1.0, t.card_border);
+    #[cfg(not(target_arch = "wasm32"))]
     if let Some(img) = live {
         box_el = box_el.child(
             el().w_full().h_full().radius(8.0).child(
@@ -218,6 +221,9 @@ fn preview_pane(s: &App, t: rune::tok::Theme, touch: bool) -> El {
             )
         );
     }
+    // Web: report the box rect so the JPEG canvas overlay can sit exactly on it.
+    #[cfg(target_arch = "wasm32")]
+    let box_el = box_el.on_drawn_layout(|s: &mut App, rect| s.preview_rect = Some(rect));
     let mut pane = col().key("preview").w_full().gap(6.0)
         .child(row().w_full().gap(8.0).center_y().flex_wrap()
             .child(section_title(t, "Live preview"))
@@ -229,8 +235,8 @@ fn preview_pane(s: &App, t: rune::tok::Theme, touch: bool) -> El {
                 |s: &mut App| { s.preview_on = !s.preview_on; }
             )))
         .child(row().w_full().center().child(box_el));
-    if s.preview_image.is_none() {
-        pane = pane.child(text("Pointing the camera? Presets recall the exact framing — this picture is ~1 frame/sec, just for aiming.".to_owned()).w_full().wrap().font(type_::LABEL).color(t.text_secondary));
+    if !has_picture {
+        pane = pane.child(text("Pointing the camera? Presets recall the exact framing — the preview streams at up to 30 fps, just for aiming.".to_owned()).w_full().wrap().font(type_::LABEL).color(t.text_secondary));
     }
     pane
 }
@@ -818,25 +824,25 @@ fn stream_help(s: &App, t: rune::tok::Theme) -> El {
     let ip = cam.ip.clone();
     col().key("streams").w_full().gap(4.0)
         .child(section_title(t, "Streams (open in VLC / OBS / vMix)"))
-        .child(text(format!("Main:  rtsp://{}:554/1", ip)).w_full().wrap().font(type_::MONO_CAPTION).color(t.text))
-        .child(text(format!("Sub:   rtsp://{}:554/2", ip)).w_full().wrap().font(type_::MONO_CAPTION).color(t.text))
+        .child(text(format!("Main:  rtsp://{}:554/1   (or /live/av0)", ip)).w_full().wrap().font(type_::MONO_CAPTION).color(t.text))
+        .child(text(format!("Sub:   rtsp://{}:554/2   (or /live/av1)", ip)).w_full().wrap().font(type_::MONO_CAPTION).color(t.text))
         .child(text(format!("RTMP:  rtmp://{}:1935/live/av0", ip)).w_full().wrap().font(type_::MONO_CAPTION).color(t.text))
         .child(text(format!("Web UI: http://{}  ({} / {})", ip, s.current().username, "•••")).w_full().wrap().font(type_::MONO_CAPTION).color(t.text))
-        .child(hint_card(t, "The in-app preview is ~1 frame/sec for aiming. For full-motion video, keep VLC/OBS open beside the controller or paste the RTSP URL into OBS as a Media Source."))
+        .child(hint_card(t, "The in-app preview streams live (~30 fps) from RTSP. For full-motion video elsewhere, keep VLC/OBS open beside the controller or paste the RTSP URL into OBS as a Media Source."))
 }
 
 // ---------------------------------------------------------------- help
 
 fn help_page(s: &App, t: rune::tok::Theme, _dark: bool, touch: bool) -> El {
     let ffmpeg_line = if s.ffmpeg_path.is_empty() {
-        "ffmpeg: NOT FOUND — the HTTP JPEG preview still works; install ffmpeg only for RTSP fallback (apt install ffmpeg / brew install ffmpeg / winget install ffmpeg).".to_string()
+        "ffmpeg: NOT FOUND — the preview falls back to HTTP stills (slow); install ffmpeg for the 30 fps RTSP stream (apt install ffmpeg / brew install ffmpeg / winget install ffmpeg).".to_string()
     } else {
-        format!("ffmpeg: found at {} — RTSP fallback is available.", s.ffmpeg_path)
+        format!("ffmpeg: found at {} — live RTSP streaming is available.", s.ffmpeg_path)
     };
     col().key("help").w_full().px(16.0).py(14.0).gap(10.0)
         .child(text("Help — church setup in 5 minutes".to_owned()).font(type_::TITLE).color(t.text))
         .child(update_card(s, t, _dark, touch))
-        .child(help_card(t, "0. Live picture", &format!("The Control page shows a ~1 frame/sec JPEG preview from http://camera/action_snapshot. RTSP/ffmpeg is only a fallback for older firmware. {ffmpeg_line}")))
+        .child(help_card(t, "0. Live picture", &format!("The Control page streams the camera's RTSP sub stream (`/2` or `/live/av1`) through ffmpeg at up to 30 fps. The browser build gets the same stream from the relay. Without ffmpeg it falls back to HTTP stills, which are much slower. {ffmpeg_line}")))
         .child(help_card(t, "1. Wire it",
             "HDMI → TV to see menus (press MENU on the IR remote). LAN → same router/switch as this PC. Power on: camera sweeps left, zooms far→near, then returns to Preset 0 if saved. LCD shows its IP (default 192.168.5.163 if no DHCP)."))
         .child(help_card(t, "2. Lock the IP",

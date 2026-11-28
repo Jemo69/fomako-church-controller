@@ -1,13 +1,15 @@
-//! Live camera preview via HTTP JPEG snapshots (native) or the LAN relay (web).
-//! RTSP/ffmpeg is a fallback for firmware without /action_snapshot.
+//! Live camera preview: a continuous RTSP → MJPEG stream at the camera's rate
+//! (capped at 30 fps), never a fresh snapshot request per frame.
 //!
 //! Rune's `Player` can't play RTSP (AVFoundation/MediaFoundation don't speak
-//! it), so the desktop app grabs a JPEG every ~1.5s with ffmpeg and draws it
-//! through `ImageCache`. The browser build can't run ffmpeg either, so it
-//! pulls JPEGs from `GET /api/snapshot?ip=` on the relay instead.
+//! it), so the desktop app runs one long-lived ffmpeg that decodes RTSP and
+//! writes MJPEG frames to stdout; this module splits them and draws through
+//! `ImageCache`. The browser build can't run ffmpeg, so the relay does the
+//! same and exposes `GET /api/stream?ip=` as multipart JPEG; the web client
+//! decodes those with zune-jpeg and uploads RGBA through `Pixels::set` (no
+//! browser image decode, no mip chain). If ffmpeg is missing, the HTTP still
+//! endpoint is polled flat out as a fallback.
 
-#[cfg(target_arch = "wasm32")]
-use std::sync::atomic::Ordering;
 #[cfg(not(target_arch = "wasm32"))]
 use std::sync::{
     Arc, Mutex,
@@ -18,10 +20,73 @@ use std::time::Duration;
 
 use crate::model::App;
 
+/// One frame, one error, or the end of a relay stream (web restarts it).
 #[derive(Debug)]
 pub enum PreviewUpdate {
     Frame { gen: u64, seq: u64, jpeg: Vec<u8> },
     Error { gen: u64, seq: u64, msg: String },
+}
+
+/// Largest JPEG we will hold while looking for its end marker.
+const MAX_FRAME: usize = 16 * 1024 * 1024;
+
+/// Reassembles JPEGs from a byte stream (ffmpeg stdout, or a relay's
+/// multipart body). Boundaries and headers between frames are ignored.
+pub struct JpegSplitter {
+    buf: Vec<u8>,
+}
+
+impl JpegSplitter {
+    pub fn new() -> Self {
+        Self { buf: Vec::new() }
+    }
+
+    /// Feed one chunk; calls `on_frame` for every complete JPEG it completes.
+    pub fn push(&mut self, data: &[u8], mut on_frame: impl FnMut(Vec<u8>)) {
+        self.buf.extend_from_slice(data);
+        loop {
+            let Some(start) = soi(&self.buf) else {
+                // A marker can straddle the chunk edge; keep the last two bytes.
+                if self.buf.len() > 2 {
+                    let keep = self.buf.len() - 2;
+                    self.buf.drain(..keep);
+                }
+                break;
+            };
+            if start > 0 {
+                self.buf.drain(..start);
+            }
+            match eoi(&self.buf) {
+                Some(end) => {
+                    let frame: Vec<u8> = self.buf.drain(..end).collect();
+                    on_frame(frame);
+                }
+                None => {
+                    if self.buf.len() > MAX_FRAME {
+                        self.buf.clear();
+                    }
+                    break;
+                }
+            }
+        }
+    }
+}
+
+impl Default for JpegSplitter {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
+fn soi(data: &[u8]) -> Option<usize> {
+    data.windows(3).position(|w| w == [0xFF, 0xD8, 0xFF])
+}
+
+fn eoi(data: &[u8]) -> Option<usize> {
+    data.windows(2)
+        .skip(2)
+        .position(|w| w == [0xFF, 0xD9])
+        .map(|p| p + 2 + 2)
 }
 
 /// Everywhere we look for ffmpeg, in order. Church booth PCs are rarely on PATH,
@@ -128,7 +193,7 @@ pub fn ffmpeg_path_or_empty() -> String {
 
 #[cfg(target_arch = "wasm32")]
 pub fn ffmpeg_path_or_empty() -> String {
-    // Browsers can't run ffmpeg; the relay does (see its /api/snapshot).
+    // Browsers can't run ffmpeg; the relay does (see its /api/stream).
     String::new()
 }
 
@@ -236,73 +301,208 @@ fn grab_http_snapshot_at(ip: &str, port: u16) -> Option<Vec<u8>> {
     }
 }
 
-/// One JPEG frame from the camera. Prefer the firmware's HTTP still endpoint;
-/// older firmware falls back to RTSP paths /1 and /live/av0.
+/// RTSP paths to try, sub stream first: 720p/360p is plenty for aiming and
+/// keeps the H.264 → MJPEG transcode cheap. FoMaKo firmware exposes the sub
+/// stream as `/2` or `/live/av1`, the main as `/1` or `/live/av0`.
 #[cfg(not(target_arch = "wasm32"))]
-pub fn grab_frame(ip: &str, user: &str, pass: &str) -> Result<Vec<u8>, String> {
-    if let Some(jpeg) = grab_http_snapshot_at(ip, 80) {
-        return Ok(jpeg);
-    }
-    let mut last_error = String::new();
-    for path in ["1", "live/av0"] {
-        match grab_ffmpeg_frame(ip, user, pass, path) {
-            Ok(jpeg) => return Ok(jpeg),
-            Err(error) => last_error = error,
-        }
-    }
-    Err(if last_error.is_empty() {
-        "preview unavailable".to_string()
-    } else {
-        last_error
-    })
+const RTSP_PATHS: [&str; 4] = ["2", "live/av1", "1", "live/av0"];
+
+#[cfg(not(target_arch = "wasm32"))]
+const FFMPEG_MISSING: &str = "ffmpeg not found — install it (apt install ffmpeg / brew install ffmpeg / winget install ffmpeg), or drop ffmpeg(.exe) next to the app";
+
+/// Publishes the newest frame into the one slot, replacing an unread frame.
+/// A UI that can't keep up drops frames instead of accumulating latency.
+#[cfg(not(target_arch = "wasm32"))]
+struct Emitter {
+    gen: u64,
+    cur: Arc<AtomicU64>,
+    slot: Arc<Mutex<Option<PreviewUpdate>>>,
+    wake: rune::Waker,
+    seq: u64,
 }
 
 #[cfg(not(target_arch = "wasm32"))]
-fn grab_ffmpeg_frame(ip: &str, user: &str, pass: &str, path: &str) -> Result<Vec<u8>, String> {
-    let out = std::process::Command::new(ffmpeg_bin())
+impl Emitter {
+    fn stale(&self) -> bool {
+        self.cur.load(Ordering::SeqCst) != self.gen
+    }
+
+    fn publish(&mut self, update: PreviewUpdate) {
+        if let Ok(mut slot) = self.slot.lock() {
+            *slot = Some(update);
+        }
+        (self.wake)();
+    }
+
+    fn frame(&mut self, jpeg: Vec<u8>) {
+        self.seq += 1;
+        self.publish(PreviewUpdate::Frame {
+            gen: self.gen,
+            seq: self.seq,
+            jpeg,
+        });
+    }
+
+    fn error(&mut self, msg: String) {
+        self.seq += 1;
+        self.publish(PreviewUpdate::Error {
+            gen: self.gen,
+            seq: self.seq,
+            msg,
+        });
+    }
+}
+
+/// Keep only the tail of a child's stderr: enough for the last error line.
+#[cfg(not(target_arch = "wasm32"))]
+fn read_tail(mut reader: impl std::io::Read) -> String {
+    let mut tail = Vec::new();
+    let mut buf = [0u8; 4096];
+    while let Ok(n) = reader.read(&mut buf) {
+        if n == 0 {
+            break;
+        }
+        tail.extend_from_slice(&buf[..n]);
+        if tail.len() > 8192 {
+            let cut = tail.len() - 8192;
+            tail.drain(..cut);
+        }
+    }
+    String::from_utf8_lossy(&tail).into_owned()
+}
+
+#[cfg(not(target_arch = "wasm32"))]
+fn ffmpeg_error(stderr: &str) -> String {
+    let line = stderr
+        .trim()
+        .lines()
+        .last()
+        .unwrap_or("ffmpeg could not open the camera stream");
+    let mut msg: String = line.chars().take(220).collect();
+    if stderr.contains("401") || stderr.to_ascii_lowercase().contains("unauthorized") {
+        msg.push_str(" — check camera login (FoMaKo default admin/admin)");
+    }
+    msg
+}
+
+/// One long-lived ffmpeg decode of `url`, publishing every JPEG it emits.
+/// Returns whether it saw any frame; an immediate failure is an error so the
+/// caller can try the next RTSP path or fall back to HTTP stills.
+#[cfg(not(target_arch = "wasm32"))]
+fn run_stream(em: &mut Emitter, url: &str) -> Result<bool, String> {
+    use std::io::Read;
+    use std::process::{Command, Stdio};
+
+    let mut child = Command::new(ffmpeg_bin())
         .args([
             "-hide_banner",
             "-loglevel",
             "error",
+            "-nostdin",
             "-rtsp_transport",
             "tcp",
             "-timeout",
-            "4000000",
+            "5000000",
             "-i",
-            &rtsp_url_for_path(ip, rtsp_port(), user, pass, path),
-            // Keyframes only: a 1-frame grab starting mid-GOP decodes to gray garbage.
-            "-skip_frame",
-            "nokey",
-            "-frames:v",
-            "1",
-            "-q:v",
-            "4",
+            url,
+            "-an",
+            "-sn",
+            "-dn",
+            // Cap at 30 fps; the sub stream is ~720p, and 576 wide is plenty for
+            // the preview box while keeping JPEG decode fast enough for 30 fps.
+            "-vf",
+            "fps=30,scale=576:-2",
             "-f",
-            "image2pipe",
-            "-vcodec",
             "mjpeg",
+            "-q:v",
+            "5",
             "-",
         ])
-        .output();
-    match out {
-        Err(e) if e.kind() == std::io::ErrorKind::NotFound => Err(
-            "ffmpeg not found — install it (apt install ffmpeg / brew install ffmpeg / winget install ffmpeg), or drop ffmpeg(.exe) next to the app".to_string(),
-        ),
-        Err(e) => Err(format!("ffmpeg: {}", e)),
-        Ok(o) if o.status.success() && !o.stdout.is_empty() => Ok(o.stdout),
-        Ok(o) => {
-            let err = String::from_utf8_lossy(&o.stderr);
-            let brief: String = err.lines().last().unwrap_or("ffmpeg failed").to_string();
-            let mut msg: String = brief.chars().take(220).collect();
-            if err.contains("401") {
-                msg.push_str(" — check camera login (FoMaKo default admin/admin)");
+        .stdin(Stdio::null())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .spawn()
+        .map_err(|e| {
+            if e.kind() == std::io::ErrorKind::NotFound {
+                FFMPEG_MISSING.to_string()
+            } else {
+                format!("ffmpeg: {}", e)
             }
-            Err(msg)
+        })?;
+    let stdout = child.stdout.take().ok_or("ffmpeg gave no stdout")?;
+    let stderr = child.stderr.take().ok_or("ffmpeg gave no stderr")?;
+    let stderr_thread = std::thread::spawn(move || read_tail(stderr));
+
+    let mut reader = std::io::BufReader::with_capacity(64 * 1024, stdout);
+    let mut splitter = JpegSplitter::new();
+    let mut chunk = vec![0u8; 64 * 1024];
+    let mut saw = false;
+    loop {
+        if em.stale() {
+            break;
+        }
+        match reader.read(&mut chunk) {
+            Ok(0) => break,
+            Ok(n) => {
+                splitter.push(&chunk[..n], |jpeg| {
+                    saw = true;
+                    em.frame(jpeg);
+                });
+            }
+            Err(_) => break,
+        }
+    }
+    let _ = child.kill();
+    let _ = child.wait();
+    let stderr = stderr_thread.join().unwrap_or_default();
+    if !saw && !em.stale() {
+        return Err(ffmpeg_error(&stderr));
+    }
+    Ok(saw)
+}
+
+/// Sleep in slices so a camera switch or Pause is noticed immediately.
+#[cfg(not(target_arch = "wasm32"))]
+fn sleep_sliced(em: &Emitter, ms: u64) {
+    let until = std::time::Instant::now() + Duration::from_millis(ms);
+    while std::time::Instant::now() < until {
+        if em.stale() {
+            return;
+        }
+        let left = until.saturating_duration_since(std::time::Instant::now());
+        std::thread::sleep(left.min(Duration::from_millis(25)));
+    }
+}
+
+/// Fallback when ffmpeg is absent or RTSP fails: poll the HTTP still endpoint
+/// flat out. Slower than a real stream, but far faster than the old 1.5 s tick.
+#[cfg(not(target_arch = "wasm32"))]
+fn snapshot_loop(em: &mut Emitter, ip: &str) -> bool {
+    let mut failures = 0u32;
+    let mut saw = false;
+    loop {
+        if em.stale() {
+            return saw;
+        }
+        match grab_http_snapshot_at(ip, 80) {
+            Some(jpeg) => {
+                failures = 0;
+                saw = true;
+                em.frame(jpeg);
+            }
+            None => {
+                failures += 1;
+                if failures >= 3 {
+                    em.error("HTTP snapshot failed — check camera IP/login, or install ffmpeg for RTSP".to_string());
+                    return saw;
+                }
+                sleep_sliced(em, 800);
+            }
         }
     }
 }
 
-/// Background loop: grab → slot → wake, until `gen` goes stale.
+/// Background loop: one stream, then restart/fall back until `gen` goes stale.
 #[cfg(not(target_arch = "wasm32"))]
 pub fn grab_loop(
     ip: String,
@@ -312,42 +512,49 @@ pub fn grab_loop(
     cur: Arc<AtomicU64>,
     slot: Arc<Mutex<Option<PreviewUpdate>>>,
     wake: rune::Waker,
-    mut seq: u64,
+    seq: u64,
 ) {
+    let mut em = Emitter {
+        gen,
+        cur,
+        slot,
+        wake,
+        seq,
+    };
     loop {
-        if cur.load(Ordering::SeqCst) != gen {
+        if em.stale() {
             break;
         }
-        let grabbed = grab_frame(&ip, &user, &pass);
-        // The camera may have changed while ffmpeg was blocked on the old stream.
-        if cur.load(Ordering::SeqCst) != gen {
+        let mut live = false;
+        if !ffmpeg_path_or_empty().is_empty() {
+            for path in RTSP_PATHS {
+                if em.stale() {
+                    return;
+                }
+                match run_stream(&mut em, &rtsp_url_for_path(&ip, rtsp_port(), &user, &pass, path))
+                {
+                    Ok(true) => {
+                        live = true;
+                        break;
+                    }
+                    Ok(false) => {}
+                    Err(msg) => {
+                        em.error(msg);
+                        break;
+                    }
+                }
+            }
+        }
+        if em.stale() {
             break;
         }
-        let failed = match grabbed {
-            Ok(jpg) => {
-                seq += 1;
-                if let Ok(mut s) = slot.lock() {
-                    *s = Some(PreviewUpdate::Frame { gen, seq, jpeg: jpg });
-                }
-                false
-            }
-            Err(msg) => {
-                seq += 1;
-                if let Ok(mut s) = slot.lock() {
-                    *s = Some(PreviewUpdate::Error { gen, seq, msg });
-                }
-                true
-            }
-        };
-        wake();
-        // Sleep in slices so stop/select reacts fast.
-        let wait = if failed { 40 } else { 15 };
-        for _ in 0..wait {
-            if cur.load(Ordering::SeqCst) != gen {
-                break;
-            }
-            std::thread::sleep(Duration::from_millis(100));
+        if !live {
+            live = snapshot_loop(&mut em, &ip);
         }
+        if em.stale() {
+            break;
+        }
+        sleep_sliced(&em, if live { 250 } else { 3000 });
     }
 }
 
@@ -355,7 +562,7 @@ pub fn grab_loop(
 /// Restarts when the camera, its credentials, or the on/off switch changes.
 /// Call from poll each frame; cheap when nothing changed.
 #[cfg(not(target_arch = "wasm32"))]
-pub fn ensure_native(app: &mut App) {
+pub fn ensure_native(app: &mut App, clock: f64) {
     let cam = app.current().clone();
     let want: Option<(String, String, String)> = if app.preview_on {
         Some((cam.ip, cam.username, cam.password))
@@ -379,20 +586,25 @@ pub fn ensure_native(app: &mut App) {
     if let Ok(mut slot) = app.preview_slot.lock() {
         *slot = None;
     }
+    app.preview_fps = 0.0;
+    app.preview_fps_frames = 0;
+    app.preview_fps_since = clock;
+    app.preview_error.clear();
+    app.preview_image = None;
+    app.preview_pending = None;
     match want {
         None => {
             app.preview_ip.clear();
             app.preview_user.clear();
             app.preview_pass.clear();
-            app.preview_image = None;
             app.preview_ready = false;
-            app.preview_error.clear();
             app.preview_status = "Preview paused".to_string();
         }
         Some((ip, user, pass)) => {
             app.preview_ip = ip.clone();
             app.preview_user = user.clone();
             app.preview_pass = pass.clone();
+            app.preview_ready = false;
             app.preview_status = format!("Connecting to {} …", ip);
             if let Some(wake) = app.preview_waker.clone() {
                 let cur = app.preview_gen.clone();
@@ -404,255 +616,354 @@ pub fn ensure_native(app: &mut App) {
     }
 }
 
-// ---------------------------------------------------------------- wasm relay fetch
+// ---------------------------------------------------------------- wasm MJPEG overlay
 
-/// One JPEG from the relay: GET {relay}/api/snapshot?ip=&user=&pass= (same origin).
+/// Web preview: a browser-native JPEG canvas over the Rune view. The browser
+/// decodes and composites frames off the UI thread, so video stays at the
+/// relay's ~30 fps even when Rune's software canvas repaints slowly.
 #[cfg(target_arch = "wasm32")]
-async fn fetch_snapshot(
-    relay_url: &str,
-    ip: &str,
-    user: &str,
-    pass: &str,
-    seq: u64,
-) -> Result<Vec<u8>, String> {
-    use wasm_bindgen::prelude::Closure;
-    use wasm_bindgen::JsCast;
-    use web_sys::{AbortController, Request, RequestCache, RequestInit};
-
-    let base = relay_url.trim_end_matches('/');
-    let url = format!(
-        "{}/api/snapshot?ip={}&user={}&pass={}&seq={}",
-        base,
-        userinfo_encode(ip),
-        userinfo_encode(user),
-        userinfo_encode(pass),
-        seq
-    );
-    let window = web_sys::window().ok_or_else(|| "no window".to_string())?;
-    let controller = AbortController::new().map_err(|_| "could not create snapshot abort controller".to_string())?;
-    let signal = controller.signal();
-    let opts = RequestInit::new();
-    opts.set_cache(RequestCache::NoStore);
-    opts.set_signal(Some(&signal));
-    let req = Request::new_with_str_and_init(&url, &opts)
-        .map_err(|_| "bad snapshot request".to_string())?;
-
-    let timeout = Closure::once(move || controller.abort());
-    let timeout_fn: js_sys::Function = timeout.as_ref().clone().into();
-    let timer = window
-        .set_timeout_with_callback_and_timeout_and_arguments_0(&timeout_fn, 18_000)
-        .map_err(|_| "could not start snapshot timeout".to_string())?;
-    let fetched = wasm_bindgen_futures::JsFuture::from(window.fetch_with_request(&req)).await;
-    window.clear_timeout_with_handle(timer);
-    drop(timeout);
-
-    let resp: web_sys::Response = match fetched {
-        Ok(value) => value
-            .dyn_into()
-            .map_err(|_| "relay returned an invalid response".to_string())?,
-        Err(_) if signal.aborted() => {
-            return Err("relay snapshot timed out — check camera/relay WiFi".to_string());
+const OVERLAY_JS: &str = r#"
+(function () {
+  if (window.__fomakoPreviewSet) return;
+  const cv = document.createElement('canvas');
+  cv.id = 'fomako-preview';
+  cv.style.cssText = 'position:fixed;display:none;pointer-events:none;z-index:2147483646;background:#000;border-radius:8px';
+  document.body.appendChild(cv);
+  const ctx = cv.getContext('2d');
+  const wake = () => { if (window.__fomakoWake) window.__fomakoWake(); };
+  let aborter = null, drawn = 0, started = performance.now();
+  window.__fomakoPreviewFps = 0;
+  window.__fomakoPreviewError = '';
+  window.__fomakoPreviewPlace = function (x, y, w, h) {
+    cv.style.left = x + 'px';
+    cv.style.top = y + 'px';
+    cv.style.width = w + 'px';
+    cv.style.height = h + 'px';
+  };
+  async function run(url) {
+    if (aborter) aborter.abort();
+    aborter = new AbortController();
+    const signal = aborter.signal;
+    window.__fomakoPreviewFps = 0;
+    window.__fomakoPreviewError = '';
+    cv.style.display = 'block';
+    drawn = 0;
+    started = performance.now();
+    let buf = new Uint8Array(0), latest = null, decoding = false;
+    const cat = (a, b) => { const c = new Uint8Array(a.length + b.length); c.set(a); c.set(b, a.length); return c; };
+    async function drain() {
+      if (decoding) return;
+      decoding = true;
+      while (latest) {
+        const jpeg = latest;
+        latest = null;
+        try {
+          const bmp = await createImageBitmap(new Blob([jpeg], {type: 'image/jpeg'}));
+          if (cv.width !== bmp.width || cv.height !== bmp.height) {
+            cv.width = bmp.width;
+            cv.height = bmp.height;
+          }
+          ctx.drawImage(bmp, 0, 0);
+          bmp.close();
+          drawn++;
+          const now = performance.now();
+          if (now - started >= 1000) {
+            window.__fomakoPreviewFps = drawn * 1000 / (now - started);
+            drawn = 0;
+            started = now;
+            wake();
+          }
+        } catch (e) {}
+      }
+      decoding = false;
+    }
+    try {
+      const resp = await fetch(url, {signal: signal, cache: 'no-store'});
+      if (!resp.ok) { window.__fomakoPreviewError = 'relay HTTP ' + resp.status; wake(); return; }
+      const reader = resp.body.getReader();
+      for (;;) {
+        const r = await reader.read();
+        if (r.done) break;
+        buf = cat(buf, r.value);
+        for (;;) {
+          let s = -1;
+          for (let i = 0; i + 2 < buf.length; i++) {
+            if (buf[i] === 255 && buf[i + 1] === 216 && buf[i + 2] === 255) { s = i; break; }
+          }
+          if (s < 0) { buf = buf.slice(Math.max(0, buf.length - 2)); break; }
+          if (s > 0) buf = buf.slice(s);
+          let e = -1;
+          for (let i = 2; i + 1 < buf.length; i++) {
+            if (buf[i] === 255 && buf[i + 1] === 217) { e = i + 2; break; }
+          }
+          if (e < 0) break;
+          latest = buf.slice(0, e);
+          buf = buf.slice(e);
+          drain();
         }
-        Err(_) => return Err("relay fetch failed — is the relay URL right?".to_string()),
-    };
-    if resp.status() != 200 {
-        let text = wasm_bindgen_futures::JsFuture::from(
-            resp.text().map_err(|_| "no error body".to_string())?,
-        )
-        .await
-        .map_err(|_| "read error failed".to_string())?;
-        let text = String::from(js_sys::JsString::from(text));
-        let detail = serde_json::from_str::<serde_json::Value>(&text)
-            .ok()
-            .and_then(|v| v.get("error").and_then(|e| e.as_str()).map(str::to_owned))
-            .unwrap_or(text);
-        return Err(format!("relay snapshot: {}", detail.chars().take(180).collect::<String>()));
+      }
+      if (!signal.aborted) { window.__fomakoPreviewError = 'stream ended'; wake(); }
+    } catch (e) {
+      if (!signal.aborted) { window.__fomakoPreviewError = String((e && e.message) || e); wake(); }
     }
-    let buf = wasm_bindgen_futures::JsFuture::from(
-        resp.array_buffer()
-            .map_err(|_| "no body".to_string())?,
-    )
-    .await
-    .map_err(|_| "read failed".to_string())?;
-    let bytes = js_sys::Uint8Array::new(&buf).to_vec();
-    if bytes.is_empty() {
-        return Err("relay returned empty image".to_string());
+  }
+  window.__fomakoPreviewSet = function (url) {
+    if (!url) {
+      if (aborter) aborter.abort();
+      aborter = null;
+      cv.style.display = 'none';
+      window.__fomakoPreviewFps = 0;
+      window.__fomakoPreviewError = '';
+      return;
     }
-    Ok(bytes)
-}
+    run(url);
+  };
+})();
+"#;
 
-/// Kick off one relay snapshot fetch (wasm); result lands in the slot + wake.
 #[cfg(target_arch = "wasm32")]
-pub fn kick_relay_fetch(app: &mut App, gen: u64) {
-    if app.preview_fetching {
-        return;
+fn overlay_ready() {
+    use std::cell::Cell;
+    thread_local! {
+        static READY: Cell<bool> = const { Cell::new(false) };
     }
-    let relay = app.relay_url.text.trim().to_string();
-    let cam = app.current().clone();
-    let (ip, user, pass) = (cam.ip, cam.username, cam.password);
-    if relay.is_empty() {
-        app.preview_status =
-            "Phone preview needs the relay URL below (LAN relay serves + forwards)".to_string();
-        return;
-    }
-    app.preview_fetching = true;
-    let slot = app.preview_slot.clone();
-    let cur = app.preview_gen.clone();
-    let seq = app.preview_frames + 1;
-    let wake = app.preview_waker.clone();
-    wasm_bindgen_futures::spawn_local(async move {
-        let upd = match fetch_snapshot(&relay, &ip, &user, &pass, seq).await {
-            Ok(jpeg) => PreviewUpdate::Frame { gen, seq, jpeg },
-            Err(msg) => PreviewUpdate::Error { gen, seq, msg },
-        };
-        if cur.load(Ordering::SeqCst) != gen {
-            return;
-        }
-        if let Ok(mut s) = slot.lock() {
-            *s = Some(upd);
-        }
-        if let Some(w) = wake {
-            w();
+    READY.with(|ready| {
+        if !ready.get() {
+            ensure_overlay_fn("__fomakoPreviewSet").or_else(|| {
+                let _ = js_sys::eval(OVERLAY_JS);
+                ensure_overlay_fn("__fomakoPreviewSet")
+            });
+            ready.set(true);
         }
     });
 }
 
+#[cfg(target_arch = "wasm32")]
+fn ensure_overlay_fn(name: &str) -> Option<()> {
+    let window = web_sys::window()?;
+    js_sys::Reflect::get(&window, &wasm_bindgen::JsValue::from_str(name))
+        .ok()
+        .filter(|value| value.is_function())
+        .map(|_| ())
+}
+
+#[cfg(target_arch = "wasm32")]
+fn overlay_call(name: &str, args: &[wasm_bindgen::JsValue]) {
+    use wasm_bindgen::JsCast;
+    let Some(window) = web_sys::window() else { return };
+    let Ok(value) = js_sys::Reflect::get(&window, &wasm_bindgen::JsValue::from_str(name)) else {
+        return;
+    };
+    if let Ok(function) = value.dyn_into::<js_sys::Function>() {
+        let list = js_sys::Array::new();
+        for arg in args {
+            list.push(arg);
+        }
+        let _ = function.apply(&wasm_bindgen::JsValue::NULL, &list);
+    }
+}
+
+#[cfg(target_arch = "wasm32")]
+fn overlay_number(name: &str) -> f64 {
+    web_sys::window()
+        .and_then(|window| {
+            js_sys::Reflect::get(&window, &wasm_bindgen::JsValue::from_str(name)).ok()
+        })
+        .and_then(|value| value.as_f64())
+        .unwrap_or(0.0)
+}
+
+#[cfg(target_arch = "wasm32")]
+fn overlay_string(name: &str) -> String {
+    web_sys::window()
+        .and_then(|window| {
+            js_sys::Reflect::get(&window, &wasm_bindgen::JsValue::from_str(name)).ok()
+        })
+        .and_then(|value| value.as_string())
+        .unwrap_or_default()
+}
+
 // ---------------------------------------------------------------- shared poll
 
-/// Drain new frames/errors into the image cache; (re)start fetchers as needed.
+/// Native: drain frames into the image cache. Web: drive the JPEG canvas overlay.
 /// Call from AppSpec::poll every frame.
-pub fn poll(app: &mut App, _clock: f64, tx: &mut rune::Tx) -> bool {
-    let mut changed = false;
-    #[cfg(not(target_arch = "wasm32"))]
-    ensure_native(app);
+pub fn poll(app: &mut App, clock: f64, _tx: &mut rune::Tx) -> bool {
     #[cfg(target_arch = "wasm32")]
     {
-        // wasm: fetch through the relay, paced by the clock.
-        let cam = app.current().clone();
-        let relay_ok = app.use_relay && !app.relay_url.text.trim().is_empty();
-        let want: Option<(String, String, String)> = if app.preview_on && relay_ok {
-            Some((cam.ip, cam.username, cam.password))
-        } else {
-            None
-        };
-        let cur: Option<(String, String, String)> = if app.preview_ip.is_empty() {
-            None
-        } else {
-            Some((
-                app.preview_ip.clone(),
-                app.preview_user.clone(),
-                app.preview_pass.clone(),
-            ))
-        };
-        if want != cur {
-            app.preview_gen.fetch_add(1, Ordering::SeqCst);
-            if let Ok(mut slot) = app.preview_slot.lock() {
-                *slot = None;
+        let _ = clock;
+        return poll_overlay(app);
+    }
+    #[cfg(not(target_arch = "wasm32"))]
+    {
+        poll_native(app, clock)
+    }
+}
+
+#[cfg(target_arch = "wasm32")]
+fn poll_overlay(app: &mut App) -> bool {
+    let mut changed = false;
+    let relay = app.relay_url.text.trim().trim_end_matches('/').to_string();
+    let relay_ok = app.use_relay && !relay.is_empty();
+    let url = if app.preview_on && relay_ok && app.page == crate::model::Page::Control {
+        let cam = app.current();
+        format!(
+            "{}/api/stream?ip={}&user={}&pass={}",
+            relay,
+            userinfo_encode(&cam.ip),
+            userinfo_encode(&cam.username),
+            userinfo_encode(&cam.password)
+        )
+    } else {
+        String::new()
+    };
+    overlay_ready();
+    // Bridge the overlay's once-a-second fps/error updates into a Rune wake so
+    // the status line follows the stream without animating the whole UI.
+    if ensure_overlay_fn("__fomakoWake").is_none() {
+        if let Some(waker) = app.preview_waker.clone() {
+            let callback = wasm_bindgen::prelude::Closure::<dyn Fn()>::new(move || waker());
+            if let Some(window) = web_sys::window() {
+                let _ = js_sys::Reflect::set(
+                    &window,
+                    &wasm_bindgen::JsValue::from_str("__fomakoWake"),
+                    callback.as_ref(),
+                );
             }
-            app.preview_user = want.as_ref().map(|w| w.1.clone()).unwrap_or_default();
-            app.preview_pass = want.as_ref().map(|w| w.2.clone()).unwrap_or_default();
-            app.preview_ip = want.as_ref().map(|w| w.0.clone()).unwrap_or_default();
-            app.preview_image = None;
-            app.preview_ready = false;
-            app.preview_error.clear();
-            app.preview_fetching = false;
-            app.preview_next_at = _clock;
-            app.preview_status = match &want {
-                Some((ip, _, _)) => format!("Connecting to {} …", ip),
-                None => {
-                    if app.preview_on && !relay_ok {
-                        "Phone preview needs the relay URL below".to_string()
-                    } else {
-                        "Preview paused".to_string()
-                    }
-                }
-            };
+            callback.forget();
+        }
+    }
+    if url != app.preview_overlay_url {
+        overlay_call(
+            "__fomakoPreviewSet",
+            &[wasm_bindgen::JsValue::from_str(&url)],
+        );
+        app.preview_overlay_url = url;
+        app.preview_fps = 0.0;
+        app.preview_ready = !app.preview_overlay_url.is_empty();
+        app.preview_status = if app.preview_overlay_url.is_empty() {
+            if app.preview_on && !relay_ok {
+                "Phone preview needs the relay URL below".to_string()
+            } else {
+                "Preview paused".to_string()
+            }
+        } else {
+            "Connecting…".to_string()
+        };
+        changed = true;
+    }
+    if let Some([x, y, w, h]) = app.preview_rect {
+        overlay_call(
+            "__fomakoPreviewPlace",
+            &[
+                x.into(),
+                y.into(),
+                w.into(),
+                h.into(),
+            ],
+        );
+    }
+    let fps = overlay_number("__fomakoPreviewFps");
+    if fps >= 0.5 && (fps as f32 - app.preview_fps).abs() > 0.01 {
+        app.preview_fps = fps as f32;
+        // Wake Rune once a second so the status line follows the overlay.
+        changed = true;
+    }
+    let error = overlay_string("__fomakoPreviewError");
+    let status = if !error.is_empty() {
+        format!("retrying… {}", error.chars().take(120).collect::<String>())
+    } else if fps >= 0.5 {
+        format!("live · {:.0} fps", fps)
+    } else if !app.preview_overlay_url.is_empty() {
+        "live".to_string()
+    } else {
+        app.preview_status.clone()
+    };
+    if app.preview_status != status {
+        app.preview_status = status;
+        changed = true;
+    }
+    changed
+}
+
+#[cfg(not(target_arch = "wasm32"))]
+fn poll_native(app: &mut App, clock: f64) -> bool {
+    let mut changed = false;
+    ensure_native(app, clock);
+    // Promote a decoded frame only when it is ready, so the window always
+    // draws a complete picture (never a pending/blank one).
+    if let Some(img) = app.preview_pending.as_ref() {
+        if img.size().is_some() {
+            app.preview_image = app.preview_pending.take();
+            app.preview_ready = true;
+            app.preview_fps_frames += 1;
+            changed = true;
+        } else if let Some(e) = img.error() {
+            let msg = format!("decode: {}", e.0.chars().take(120).collect::<String>());
+            app.preview_error = msg.clone();
+            app.preview_status = msg;
+            app.preview_pending = None;
             changed = true;
         }
-        if app.preview_on && !relay_ok {
-            let message = "Phone preview needs the relay URL below (LAN relay serves + forwards)";
-            if app.preview_status != message {
-                app.preview_status = message.to_string();
-                changed = true;
-            }
-        }
-        if want.is_some() && !app.preview_fetching && _clock >= app.preview_next_at {
-            app.preview_next_at = _clock + 1.5;
-            let gen = app.preview_gen.load(Ordering::SeqCst);
-            kick_relay_fetch(app, gen);
-        }
-        let _ = tx;
     }
-    // Drain whatever the fetcher delivered.
-    let update = app
-        .preview_slot
-        .lock()
-        .map(|mut s| s.take())
-        .unwrap_or(None);
-    if let Some(u) = update {
-        let gen = match &u {
+    // One decode in flight at a time; the slot keeps only the newest frame.
+    let pending = if app.preview_pending.is_none() {
+        app.preview_slot
+            .lock()
+            .map(|mut slot| slot.take())
+            .unwrap_or(None)
+    } else {
+        None
+    };
+    if let Some(update) = pending {
+        let gen = match &update {
             PreviewUpdate::Frame { gen, .. } | PreviewUpdate::Error { gen, .. } => *gen,
         };
-        if gen != app.preview_gen.load(Ordering::SeqCst) {
-            return changed;
-        }
-        match u {
-            PreviewUpdate::Frame { seq, jpeg, .. } => {
-                app.preview_frames = seq;
-                app.preview_error.clear();
-                app.preview_ready = false;
-                if let Some(cache) = app.preview_cache.as_ref() {
-                    app.preview_image = Some(cache.load(jpeg));
-                    app.preview_status = format!("decoding frame {} …", seq);
-                } else {
-                    app.preview_status = "image cache not ready".to_string();
+        if gen == app.preview_gen.load(Ordering::SeqCst) {
+            match update {
+                PreviewUpdate::Frame { seq, jpeg, .. } => {
+                    let first = app.preview_image.is_none() && app.preview_pending.is_none();
+                    app.preview_frames = seq;
+                    app.preview_error.clear();
+                    if let Some(cache) = app.preview_cache.as_ref() {
+                        app.preview_pending = Some(cache.load(jpeg));
+                        if first {
+                            app.preview_status = format!("decoding frame {} …", seq);
+                        }
+                    } else {
+                        app.preview_status = "image cache not ready".to_string();
+                    }
+                    changed = true;
                 }
-                #[cfg(target_arch = "wasm32")]
-                {
-                    app.preview_fetching = false;
+                PreviewUpdate::Error { seq, msg, .. } => {
+                    app.preview_frames = seq;
+                    app.preview_error = msg.clone();
+                    app.preview_status =
+                        format!("retrying… {}", msg.chars().take(120).collect::<String>());
+                    changed = true;
                 }
-                changed = true;
             }
-            PreviewUpdate::Error { seq, msg, .. } => {
-                app.preview_frames = seq;
-                app.preview_error = msg.clone();
-                app.preview_status = format!("retrying… {}", msg.chars().take(120).collect::<String>());
-                #[cfg(target_arch = "wasm32")]
-                {
-                    // Back off before the next try.
-                    app.preview_fetching = false;
-                    app.preview_next_at = _clock + 4.0;
-                }
-                changed = true;
-            }
-        }
-        #[cfg(not(target_arch = "wasm32"))]
-        {
-            let _ = tx;
         }
     }
-    // Surface decode errors (bad bytes, unsupported codec).
-    // A newly decoded image also needs one more commit so the still window repaints.
-    if let Some(img) = app.preview_image.as_ref() {
-        if img.size().is_some() && !app.preview_ready {
-            app.preview_ready = true;
-            app.preview_status = format!("live · frame {}", app.preview_frames);
+    // Frames decoded per second, shown in the status line so 30 fps is visible.
+    if app.preview_fps_since == 0.0 {
+        app.preview_fps_since = clock;
+    }
+    let span = clock - app.preview_fps_since;
+    if span >= 1.0 {
+        app.preview_fps = app.preview_fps_frames as f32 / span as f32;
+        app.preview_fps_frames = 0;
+        app.preview_fps_since = clock;
+        changed = true;
+    }
+    if app.preview_ready {
+        let status = if app.preview_fps >= 0.5 {
+            format!("live · {:.0} fps", app.preview_fps)
+        } else {
+            "live".to_string()
+        };
+        if app.preview_status != status {
+            app.preview_status = status;
             changed = true;
-        }
-        if img.size().is_none() && app.preview_error.is_empty() {
-            let msg = format!("decoding frame {} …", app.preview_frames);
-            if app.preview_status != msg {
-                app.preview_status = msg;
-                changed = true;
-            }
-        }
-        if let Some(e) = img.error() {
-            let msg = format!("decode: {}", e.0.chars().take(120).collect::<String>());
-            if app.preview_error != msg {
-                app.preview_error = msg.clone();
-                app.preview_status = msg;
-                changed = true;
-            }
         }
     }
     changed
@@ -660,8 +971,46 @@ pub fn poll(app: &mut App, _clock: f64, tx: &mut rune::Tx) -> bool {
 
 #[cfg(all(test, not(target_arch = "wasm32")))]
 mod tests {
-    use super::grab_http_snapshot_at;
+    use super::{JpegSplitter, grab_http_snapshot_at};
     use std::io::{Read, Write};
+
+    fn split(chunks: &[&[u8]]) -> Vec<Vec<u8>> {
+        let mut splitter = JpegSplitter::new();
+        let mut frames = Vec::new();
+        for chunk in chunks {
+            splitter.push(chunk, |jpeg| frames.push(jpeg));
+        }
+        frames
+    }
+
+    #[test]
+    fn splitter_finds_frames_across_chunk_edges() {
+        // Two tiny JPEGs, one split mid-marker, with multipart headers between.
+        let a = [0xFF, 0xD8, 0xFF, 0xE0, 0x01, 0x02, 0xFF, 0xD9];
+        let b = [0xFF, 0xD8, 0xFF, 0xDB, 0x03, 0xFF, 0xD9];
+        let mut stream = Vec::new();
+        stream.extend_from_slice(b"--frame\r\nContent-Type: image/jpeg\r\n\r\n");
+        stream.extend_from_slice(&a);
+        stream.extend_from_slice(b"\r\n--frame\r\n\r\n");
+        stream.extend_from_slice(&b);
+        stream.extend_from_slice(b"\r\n--frame--\r\n");
+        for cut in 1..stream.len() {
+            let frames = split(&[&stream[..cut], &stream[cut..]]);
+            assert_eq!(frames, vec![a.to_vec(), b.to_vec()], "cut at {cut}");
+        }
+    }
+
+    #[test]
+    fn splitter_keeps_only_the_latest_complete_frames() {
+        let frame = [0xFF, 0xD8, 0xFF, 0xE0, 0x00, 0xFF, 0xD9];
+        let mut bytes = Vec::new();
+        for _ in 0..3 {
+            bytes.extend_from_slice(&frame);
+        }
+        let frames = split(&[&bytes]);
+        assert_eq!(frames.len(), 3);
+        assert!(frames.iter().all(|f| f == &frame));
+    }
 
     #[test]
     fn http_snapshot_is_preferred_and_decoded_as_jpeg() {

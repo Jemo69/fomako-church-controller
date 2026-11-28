@@ -170,17 +170,25 @@ pub struct App {
     pub preview_cache: Option<rune::ImageCache>,
     pub preview_waker: Option<rune::Waker>,
     pub preview_image: Option<rune::Image>,
+    /// The frame currently decoding; promoted to `preview_image` when ready.
+    pub preview_pending: Option<rune::Image>,
     pub preview_status: String,
     pub preview_error: String,
     pub preview_frames: u64,
     pub preview_ready: bool,
+    /// Decoded-frame counter and clock for the live fps readout.
+    pub preview_fps: f32,
+    pub preview_fps_frames: u64,
+    pub preview_fps_since: f64,
     /// Resolved once at startup for the Help page; the fetcher re-resolves
     /// every grab so a later install is picked up without a restart.
     pub ffmpeg_path: String,
+    /// Where the preview box was drawn last (web: positions the MJPEG overlay).
     #[cfg(target_arch = "wasm32")]
-    pub preview_fetching: bool,
+    pub preview_rect: Option<[f32; 4]>,
+    /// Stream URL currently loaded into the web overlay; empty when hidden.
     #[cfg(target_arch = "wasm32")]
-    pub preview_next_at: f64,
+    pub preview_overlay_url: String,
     #[cfg(target_arch = "wasm32")]
     pub action_slot: Arc<Mutex<Option<ActionReply>>>,
     #[cfg(target_arch = "wasm32")]
@@ -291,15 +299,19 @@ impl App {
             preview_cache: None,
             preview_waker: None,
             preview_image: None,
+            preview_pending: None,
             preview_status: "Preview starting…".to_string(),
             preview_error: String::new(),
             preview_frames: 0,
             preview_ready: false,
+            preview_fps: 0.0,
+            preview_fps_frames: 0,
+            preview_fps_since: 0.0,
             ffmpeg_path: crate::preview::ffmpeg_path_or_empty(),
             #[cfg(target_arch = "wasm32")]
-            preview_fetching: false,
+            preview_rect: None,
             #[cfg(target_arch = "wasm32")]
-            preview_next_at: 0.0,
+            preview_overlay_url: String::new(),
             #[cfg(target_arch = "wasm32")]
             action_slot: Arc::new(Mutex::new(None)),
             #[cfg(target_arch = "wasm32")]
