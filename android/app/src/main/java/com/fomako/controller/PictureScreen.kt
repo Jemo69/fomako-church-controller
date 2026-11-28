@@ -150,12 +150,9 @@ fun PictureScreen(state: ControllerState) {
                     )
                 }
             }
-            val b = (7f + state.picBright * 0.07f).roundToInt().coerceIn(0, 14)
-            val c = (7f + state.picContrast * 0.07f).roundToInt().coerceIn(0, 14)
-            val s = (7f + state.picSat * 0.07f).roundToInt().coerceIn(0, 14)
-            val ap = (8f + state.picSharp * 0.07f).roundToInt().coerceIn(0, 15)
+            val values = pictureEditValues(state.picBright, state.picContrast, state.picSat, state.picSharp)
             Text(
-                text = "Will send: Bright $b  Contrast $c  Sat $s  Sharp $ap",
+                text = "Will send: Bright ${values.brightness}  Contrast ${values.contrast}  Sat ${values.saturation}  Sharp ${values.sharpness}",
                 style = MaterialTheme.typography.labelMedium,
                 color = MaterialTheme.colorScheme.onSurfaceVariant,
                 fontFamily = FontFamily.Monospace,

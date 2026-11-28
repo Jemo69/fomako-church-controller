@@ -5,6 +5,7 @@ mod actions;
 mod discover;
 mod model;
 mod preview;
+mod update;
 mod visca;
 mod view;
 
@@ -14,17 +15,21 @@ use rune::{AppSpec, Tx};
 /// Called once with a waker other threads use when new data arrives.
 fn setup(s: &mut App, waker: rune::Waker) {
     s.preview_cache = Some(rune::ImageCache::new(waker.clone()));
-    s.preview_waker = Some(waker);
+    s.preview_waker = Some(waker.clone());
+    s.update_waker = Some(waker);
 }
 
 /// Drain background network-scan results + preview frames; re-arm while busy.
 fn poll(s: &mut App, clock: f64, tx: &mut Tx) -> bool {
     let mut changed = s.scan_poll(tx);
     changed |= crate::preview::poll(s, clock, tx);
+    changed |= crate::update::poll(s, clock, tx);
     changed
 }
 
 fn main() {
+    // Clear staging/`.old` leftovers from an earlier update before drawing anything.
+    update::cleanup_stale();
     let spec = AppSpec {
         scenes: &[
             ("control", |s: &mut App| s.page = model::Page::Control),

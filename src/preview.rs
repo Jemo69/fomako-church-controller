@@ -1,10 +1,13 @@
-//! Live camera preview via ffmpeg snapshots (native) or the LAN relay (web).
+//! Live camera preview via HTTP JPEG snapshots (native) or the LAN relay (web).
+//! RTSP/ffmpeg is a fallback for firmware without /action_snapshot.
 //!
 //! Rune's `Player` can't play RTSP (AVFoundation/MediaFoundation don't speak
 //! it), so the desktop app grabs a JPEG every ~1.5s with ffmpeg and draws it
 //! through `ImageCache`. The browser build can't run ffmpeg either, so it
 //! pulls JPEGs from `GET /api/snapshot?ip=` on the relay instead.
 
+#[cfg(target_arch = "wasm32")]
+use std::sync::atomic::Ordering;
 #[cfg(not(target_arch = "wasm32"))]
 use std::sync::{
     Arc, Mutex,
@@ -17,8 +20,8 @@ use crate::model::App;
 
 #[derive(Debug)]
 pub enum PreviewUpdate {
-    Frame { seq: u64, jpeg: Vec<u8> },
-    Error { seq: u64, msg: String },
+    Frame { gen: u64, seq: u64, jpeg: Vec<u8> },
+    Error { gen: u64, seq: u64, msg: String },
 }
 
 /// Everywhere we look for ffmpeg, in order. Church booth PCs are rarely on PATH,
@@ -168,24 +171,94 @@ pub fn userinfo_encode(s: &str) -> String {
     out
 }
 
-/// rtsp://[user:pass@]ip:port/live/av0 — empty user means anonymous.
+/// rtsp://[user:pass@]ip:port/1 — the FoMaKo firmware's primary stream path.
 pub fn rtsp_url(ip: &str, port: u16, user: &str, pass: &str) -> String {
+    rtsp_url_for_path(ip, port, user, pass, "1")
+}
+
+fn rtsp_url_for_path(ip: &str, port: u16, user: &str, pass: &str, path: &str) -> String {
     if user.is_empty() {
-        format!("rtsp://{}:{}/live/av0", ip, port)
+        format!("rtsp://{}:{}/{}", ip, port, path)
     } else {
         format!(
-            "rtsp://{}:{}@{}:{}/live/av0",
+            "rtsp://{}:{}@{}:{}/{}",
             userinfo_encode(user),
             userinfo_encode(pass),
             ip,
-            port
+            port,
+            path
         )
     }
 }
 
-/// One JPEG frame from the camera's RTSP stream. Err carries a short diagnosis.
+/// FoMaKo exposes a lightweight JPEG still at /action_snapshot. It works on
+/// phones and avoids RTSP codec/authentication differences between firmware.
+#[cfg(not(target_arch = "wasm32"))]
+fn grab_http_snapshot_at(ip: &str, port: u16) -> Option<Vec<u8>> {
+    use std::io::{Read, Write};
+    use std::net::{TcpStream, ToSocketAddrs};
+
+    let addr = (ip, port).to_socket_addrs().ok()?.next()?;
+    let mut stream = TcpStream::connect_timeout(&addr, Duration::from_millis(1200)).ok()?;
+    stream.set_read_timeout(Some(Duration::from_millis(2500))).ok()?;
+    stream.set_write_timeout(Some(Duration::from_millis(800))).ok()?;
+    let stamp = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .unwrap_or_default()
+        .as_millis();
+    let request = format!(
+        "GET /action_snapshot?t={} HTTP/1.1\r\nHost: {}:{}\r\nConnection: close\r\nCache-Control: no-cache\r\n\r\n",
+        stamp, ip, port
+    );
+    stream.write_all(request.as_bytes()).ok()?;
+    let mut data = Vec::new();
+    let mut buf = [0u8; 8192];
+    loop {
+        let n = stream.read(&mut buf).ok()?;
+        if n == 0 {
+            break;
+        }
+        data.extend_from_slice(&buf[..n]);
+        if data.len() > 8 * 1024 * 1024 {
+            return None;
+        }
+    }
+    let header_end = data.windows(4).position(|w| w == b"\r\n\r\n")? + 4;
+    let head = String::from_utf8_lossy(&data[..header_end]);
+    if !head.lines().next()?.contains(" 200 ") {
+        return None;
+    }
+    let body = &data[header_end..];
+    if body.starts_with(&[0xFF, 0xD8, 0xFF]) {
+        Some(body.to_vec())
+    } else {
+        None
+    }
+}
+
+/// One JPEG frame from the camera. Prefer the firmware's HTTP still endpoint;
+/// older firmware falls back to RTSP paths /1 and /live/av0.
 #[cfg(not(target_arch = "wasm32"))]
 pub fn grab_frame(ip: &str, user: &str, pass: &str) -> Result<Vec<u8>, String> {
+    if let Some(jpeg) = grab_http_snapshot_at(ip, 80) {
+        return Ok(jpeg);
+    }
+    let mut last_error = String::new();
+    for path in ["1", "live/av0"] {
+        match grab_ffmpeg_frame(ip, user, pass, path) {
+            Ok(jpeg) => return Ok(jpeg),
+            Err(error) => last_error = error,
+        }
+    }
+    Err(if last_error.is_empty() {
+        "preview unavailable".to_string()
+    } else {
+        last_error
+    })
+}
+
+#[cfg(not(target_arch = "wasm32"))]
+fn grab_ffmpeg_frame(ip: &str, user: &str, pass: &str, path: &str) -> Result<Vec<u8>, String> {
     let out = std::process::Command::new(ffmpeg_bin())
         .args([
             "-hide_banner",
@@ -196,7 +269,7 @@ pub fn grab_frame(ip: &str, user: &str, pass: &str) -> Result<Vec<u8>, String> {
             "-timeout",
             "4000000",
             "-i",
-            &rtsp_url(ip, rtsp_port(), user, pass),
+            &rtsp_url_for_path(ip, rtsp_port(), user, pass, path),
             // Keyframes only: a 1-frame grab starting mid-GOP decodes to gray garbage.
             "-skip_frame",
             "nokey",
@@ -245,18 +318,23 @@ pub fn grab_loop(
         if cur.load(Ordering::SeqCst) != gen {
             break;
         }
-        let failed = match grab_frame(&ip, &user, &pass) {
+        let grabbed = grab_frame(&ip, &user, &pass);
+        // The camera may have changed while ffmpeg was blocked on the old stream.
+        if cur.load(Ordering::SeqCst) != gen {
+            break;
+        }
+        let failed = match grabbed {
             Ok(jpg) => {
                 seq += 1;
                 if let Ok(mut s) = slot.lock() {
-                    *s = Some(PreviewUpdate::Frame { seq, jpeg: jpg });
+                    *s = Some(PreviewUpdate::Frame { gen, seq, jpeg: jpg });
                 }
                 false
             }
             Err(msg) => {
                 seq += 1;
                 if let Ok(mut s) = slot.lock() {
-                    *s = Some(PreviewUpdate::Error { seq, msg });
+                    *s = Some(PreviewUpdate::Error { gen, seq, msg });
                 }
                 true
             }
@@ -296,19 +374,22 @@ pub fn ensure_native(app: &mut App) {
     if cur == want {
         return;
     }
-    // Stop whatever runs.
-    app.preview_gen.fetch_add(1, Ordering::SeqCst);
+    // Stop whatever runs and discard a frame that belonged to the old target.
+    let gen = app.preview_gen.fetch_add(1, Ordering::SeqCst) + 1;
+    if let Ok(mut slot) = app.preview_slot.lock() {
+        *slot = None;
+    }
     match want {
         None => {
             app.preview_ip.clear();
             app.preview_user.clear();
             app.preview_pass.clear();
             app.preview_image = None;
+            app.preview_ready = false;
+            app.preview_error.clear();
             app.preview_status = "Preview paused".to_string();
         }
         Some((ip, user, pass)) => {
-            let gen = app.preview_gen.load(Ordering::SeqCst) + 1;
-            app.preview_gen.store(gen, Ordering::SeqCst);
             app.preview_ip = ip.clone();
             app.preview_user = user.clone();
             app.preview_pass = pass.clone();
@@ -327,24 +408,65 @@ pub fn ensure_native(app: &mut App) {
 
 /// One JPEG from the relay: GET {relay}/api/snapshot?ip=&user=&pass= (same origin).
 #[cfg(target_arch = "wasm32")]
-async fn fetch_snapshot(relay_url: &str, ip: &str, user: &str, pass: &str) -> Result<Vec<u8>, String> {
-    use wasm_bindgen::JsValue;
+async fn fetch_snapshot(
+    relay_url: &str,
+    ip: &str,
+    user: &str,
+    pass: &str,
+    seq: u64,
+) -> Result<Vec<u8>, String> {
+    use wasm_bindgen::prelude::Closure;
+    use wasm_bindgen::JsCast;
+    use web_sys::{AbortController, Request, RequestCache, RequestInit};
+
     let base = relay_url.trim_end_matches('/');
     let url = format!(
-        "{}/api/snapshot?ip={}&user={}&pass={}",
+        "{}/api/snapshot?ip={}&user={}&pass={}&seq={}",
         base,
-        ip,
+        userinfo_encode(ip),
         userinfo_encode(user),
-        userinfo_encode(pass)
+        userinfo_encode(pass),
+        seq
     );
     let window = web_sys::window().ok_or_else(|| "no window".to_string())?;
-    let resp: web_sys::Response =
-        wasm_bindgen_futures::JsFuture::from(window.fetch_with_str(&url))
-            .await
-            .map_err(|_| "relay fetch failed — is the relay URL right?".to_string())?
-            .into();
+    let controller = AbortController::new().map_err(|_| "could not create snapshot abort controller".to_string())?;
+    let signal = controller.signal();
+    let opts = RequestInit::new();
+    opts.set_cache(RequestCache::NoStore);
+    opts.set_signal(Some(&signal));
+    let req = Request::new_with_str_and_init(&url, &opts)
+        .map_err(|_| "bad snapshot request".to_string())?;
+
+    let timeout = Closure::once(move || controller.abort());
+    let timeout_fn: js_sys::Function = timeout.as_ref().clone().into();
+    let timer = window
+        .set_timeout_with_callback_and_timeout_and_arguments_0(&timeout_fn, 18_000)
+        .map_err(|_| "could not start snapshot timeout".to_string())?;
+    let fetched = wasm_bindgen_futures::JsFuture::from(window.fetch_with_request(&req)).await;
+    window.clear_timeout_with_handle(timer);
+    drop(timeout);
+
+    let resp: web_sys::Response = match fetched {
+        Ok(value) => value
+            .dyn_into()
+            .map_err(|_| "relay returned an invalid response".to_string())?,
+        Err(_) if signal.aborted() => {
+            return Err("relay snapshot timed out — check camera/relay WiFi".to_string());
+        }
+        Err(_) => return Err("relay fetch failed — is the relay URL right?".to_string()),
+    };
     if resp.status() != 200 {
-        return Err(format!("relay snapshot: HTTP {}", resp.status()));
+        let text = wasm_bindgen_futures::JsFuture::from(
+            resp.text().map_err(|_| "no error body".to_string())?,
+        )
+        .await
+        .map_err(|_| "read error failed".to_string())?;
+        let text = String::from(js_sys::JsString::from(text));
+        let detail = serde_json::from_str::<serde_json::Value>(&text)
+            .ok()
+            .and_then(|v| v.get("error").and_then(|e| e.as_str()).map(str::to_owned))
+            .unwrap_or(text);
+        return Err(format!("relay snapshot: {}", detail.chars().take(180).collect::<String>()));
     }
     let buf = wasm_bindgen_futures::JsFuture::from(
         resp.array_buffer()
@@ -356,13 +478,12 @@ async fn fetch_snapshot(relay_url: &str, ip: &str, user: &str, pass: &str) -> Re
     if bytes.is_empty() {
         return Err("relay returned empty image".to_string());
     }
-    let _ = JsValue::null();
     Ok(bytes)
 }
 
 /// Kick off one relay snapshot fetch (wasm); result lands in the slot + wake.
 #[cfg(target_arch = "wasm32")]
-pub fn kick_relay_fetch(app: &mut App) {
+pub fn kick_relay_fetch(app: &mut App, gen: u64) {
     if app.preview_fetching {
         return;
     }
@@ -376,13 +497,17 @@ pub fn kick_relay_fetch(app: &mut App) {
     }
     app.preview_fetching = true;
     let slot = app.preview_slot.clone();
+    let cur = app.preview_gen.clone();
     let seq = app.preview_frames + 1;
     let wake = app.preview_waker.clone();
     wasm_bindgen_futures::spawn_local(async move {
-        let upd = match fetch_snapshot(&relay, &ip, &user, &pass).await {
-            Ok(jpeg) => PreviewUpdate::Frame { seq, jpeg },
-            Err(msg) => PreviewUpdate::Error { seq, msg },
+        let upd = match fetch_snapshot(&relay, &ip, &user, &pass, seq).await {
+            Ok(jpeg) => PreviewUpdate::Frame { gen, seq, jpeg },
+            Err(msg) => PreviewUpdate::Error { gen, seq, msg },
         };
+        if cur.load(Ordering::SeqCst) != gen {
+            return;
+        }
         if let Ok(mut s) = slot.lock() {
             *s = Some(upd);
         }
@@ -420,11 +545,18 @@ pub fn poll(app: &mut App, _clock: f64, tx: &mut rune::Tx) -> bool {
             ))
         };
         if want != cur {
+            app.preview_gen.fetch_add(1, Ordering::SeqCst);
+            if let Ok(mut slot) = app.preview_slot.lock() {
+                *slot = None;
+            }
             app.preview_user = want.as_ref().map(|w| w.1.clone()).unwrap_or_default();
             app.preview_pass = want.as_ref().map(|w| w.2.clone()).unwrap_or_default();
             app.preview_ip = want.as_ref().map(|w| w.0.clone()).unwrap_or_default();
             app.preview_image = None;
+            app.preview_ready = false;
+            app.preview_error.clear();
             app.preview_fetching = false;
+            app.preview_next_at = _clock;
             app.preview_status = match &want {
                 Some((ip, _, _)) => format!("Connecting to {} …", ip),
                 None => {
@@ -437,9 +569,17 @@ pub fn poll(app: &mut App, _clock: f64, tx: &mut rune::Tx) -> bool {
             };
             changed = true;
         }
+        if app.preview_on && !relay_ok {
+            let message = "Phone preview needs the relay URL below (LAN relay serves + forwards)";
+            if app.preview_status != message {
+                app.preview_status = message.to_string();
+                changed = true;
+            }
+        }
         if want.is_some() && !app.preview_fetching && _clock >= app.preview_next_at {
             app.preview_next_at = _clock + 1.5;
-            kick_relay_fetch(app);
+            let gen = app.preview_gen.load(Ordering::SeqCst);
+            kick_relay_fetch(app, gen);
         }
         let _ = tx;
     }
@@ -450,14 +590,20 @@ pub fn poll(app: &mut App, _clock: f64, tx: &mut rune::Tx) -> bool {
         .map(|mut s| s.take())
         .unwrap_or(None);
     if let Some(u) = update {
+        let gen = match &u {
+            PreviewUpdate::Frame { gen, .. } | PreviewUpdate::Error { gen, .. } => *gen,
+        };
+        if gen != app.preview_gen.load(Ordering::SeqCst) {
+            return changed;
+        }
         match u {
-            PreviewUpdate::Frame { seq, jpeg } => {
+            PreviewUpdate::Frame { seq, jpeg, .. } => {
                 app.preview_frames = seq;
                 app.preview_error.clear();
                 app.preview_ready = false;
                 if let Some(cache) = app.preview_cache.as_ref() {
                     app.preview_image = Some(cache.load(jpeg));
-                    app.preview_status = format!("live · frame {}", seq);
+                    app.preview_status = format!("decoding frame {} …", seq);
                 } else {
                     app.preview_status = "image cache not ready".to_string();
                 }
@@ -467,7 +613,7 @@ pub fn poll(app: &mut App, _clock: f64, tx: &mut rune::Tx) -> bool {
                 }
                 changed = true;
             }
-            PreviewUpdate::Error { seq, msg } => {
+            PreviewUpdate::Error { seq, msg, .. } => {
                 app.preview_frames = seq;
                 app.preview_error = msg.clone();
                 app.preview_status = format!("retrying… {}", msg.chars().take(120).collect::<String>());
@@ -490,6 +636,7 @@ pub fn poll(app: &mut App, _clock: f64, tx: &mut rune::Tx) -> bool {
     if let Some(img) = app.preview_image.as_ref() {
         if img.size().is_some() && !app.preview_ready {
             app.preview_ready = true;
+            app.preview_status = format!("live · frame {}", app.preview_frames);
             changed = true;
         }
         if img.size().is_none() && app.preview_error.is_empty() {
@@ -509,4 +656,35 @@ pub fn poll(app: &mut App, _clock: f64, tx: &mut rune::Tx) -> bool {
         }
     }
     changed
+}
+
+#[cfg(all(test, not(target_arch = "wasm32")))]
+mod tests {
+    use super::grab_http_snapshot_at;
+    use std::io::{Read, Write};
+
+    #[test]
+    fn http_snapshot_is_preferred_and_decoded_as_jpeg() {
+        let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+        let port = listener.local_addr().unwrap().port();
+        std::thread::spawn(move || {
+            let (mut stream, _) = listener.accept().unwrap();
+            let mut request = Vec::new();
+            let mut buf = [0u8; 1024];
+            while !request.windows(4).any(|w| w == b"\r\n\r\n") {
+                let n = stream.read(&mut buf).unwrap();
+                request.extend_from_slice(&buf[..n]);
+            }
+            assert!(String::from_utf8_lossy(&request).contains("/action_snapshot"));
+            let body = [0xFF, 0xD8, 0xFF, 0xD9];
+            write!(
+                stream,
+                "HTTP/1.1 200 OK\r\nContent-Type: image/jpeg\r\nContent-Length: {}\r\nConnection: close\r\n\r\n",
+                body.len()
+            )
+            .unwrap();
+            stream.write_all(&body).unwrap();
+        });
+        assert_eq!(grab_http_snapshot_at("127.0.0.1", port), Some(vec![0xFF, 0xD8, 0xFF, 0xD9]));
+    }
 }

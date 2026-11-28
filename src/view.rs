@@ -5,6 +5,7 @@ use rune::{Cx, El, ScrollSpec, TextStyle, col, el, row, text, text_input};
 
 use crate::actions;
 use crate::model::{App, Page};
+use crate::update::{self, UpdatePhase};
 use crate::visca::PtDir;
 
 fn field_style() -> TextStyle {
@@ -79,6 +80,18 @@ where F: Fn(&mut App, &mut rune::Tx) + 'static {
         .child(text(label.to_owned()).font(type_::BODY).color(rune::Color::WHITE).a11y_hidden())
 }
 
+/// Quiet button that opens a link in the system browser.
+fn link_btn(label: &str, a11y: &str, key: &str, url: &'static str, t: rune::tok::Theme, h: f32) -> El {
+    el().key(key.to_owned()).h(h).px(12.0).center().radius(8.0)
+        .fill(t.card).border(1.0, t.card_border)
+        .hover(t.hover).press(t.press).focusable(true)
+        .role("button").label(a11y.to_owned())
+        .on_press_tx(move |_s: &mut App, tx: &mut rune::Tx| {
+            let _ = tx.open_url(url);
+        })
+        .child(text(label.to_owned()).font(type_::BODY).color(t.text).a11y_hidden())
+}
+
 fn section_title(t: rune::tok::Theme, title: &str) -> El {
     text(title.to_owned()).key(format!("sec-{}", title)).role("heading").font(type_::SECTION).color(t.text_secondary)
 }
@@ -119,7 +132,7 @@ pub fn view(s: &App, cx: &mut Cx<App>) -> El {
                     Page::Image => image_page(s, t, dark, touch),
                     Page::Picture => picture_page(s, t, dark, touch),
                     Page::Cameras => cameras_page(s, t, dark, touch),
-                    Page::Help => help_page(s, t, dark),
+                    Page::Help => help_page(s, t, dark, touch),
                 })
         )
         .child(statusbar(s, t))
@@ -129,17 +142,37 @@ fn topbar(s: &App, t: rune::tok::Theme, dark: bool, touch: bool, _cx: &mut Cx<Ap
     let cam = s.current();
     let title = format!("FoMaKo Church Control  •  {} @ {}  •  {}", cam.name, cam.ip, cam.protocol.label());
     let bh = if touch { 42.0 } else { 30.0 };
-    row().key("topbar").w_full().min_h(52.0).py(8.0).px(16.0).center_y().gap(10.0).flex_wrap().fill(t.card).border(0.0, t.card_border)
+    let mut bar = row().key("topbar").w_full().min_h(52.0).py(8.0).px(16.0).center_y().gap(10.0).flex_wrap().fill(t.card).border(0.0, t.card_border)
         .child(
             col().grow(1.0).shrink().min_w(160.0)
                 .child(text("FoMaKo PTZ — Church Controller".to_owned()).w_full().wrap().role("heading").font(type_::TITLE).color(t.text))
                 .child(text(title).w_full().wrap().font(type_::LABEL).color(t.text_secondary))
-        )
-        .child(btn_labeled(
-            if dark { "☾ Dark" } else { "☀ Light" },
-            if dark { "Switch to light theme" } else { "Switch to dark theme" },
-            "theme", t, 88.0, bh, |s: &mut App| s.dark = !s.dark
-        ))
+        );
+    // A newer build is waiting: keep it visible without stealing focus.
+    match s.update_phase {
+        UpdatePhase::Available => {
+            bar = bar.child(btn_labeled(
+                &format!("⬆ Update v{}", s.update_version),
+                "A newer version is available — open Help to install it",
+                "update-badge", t, 132.0, bh,
+                |s: &mut App| s.page = Page::Help,
+            ));
+        }
+        UpdatePhase::Ready => {
+            bar = bar.child(btn_labeled(
+                "⬆ Restart to update",
+                "The new version is installed — open Help to restart",
+                "update-badge", t, 150.0, bh,
+                |s: &mut App| s.page = Page::Help,
+            ));
+        }
+        _ => {}
+    }
+    bar.child(btn_labeled(
+        if dark { "☾ Dark" } else { "☀ Light" },
+        if dark { "Switch to light theme" } else { "Switch to dark theme" },
+        "theme", t, 88.0, bh, |s: &mut App| s.dark = !s.dark
+    ))
 }
 
 fn tabbar(s: &App, t: rune::tok::Theme, _dark: bool, touch: bool) -> El {
@@ -443,6 +476,7 @@ fn wb_row(s: &App, t: rune::tok::Theme, dark: bool, touch: bool) -> El {
 
 fn picture_page(s: &App, t: rune::tok::Theme, dark: bool, touch: bool) -> El {
     let bh = if touch { 44.0 } else { 34.0 };
+    let (b, c, sat, sharp) = actions::picture_edit_targets(s.pic_bright, s.pic_contrast, s.pic_sat, s.pic_sharp);
     col().key("picture").w_full().px(16.0).py(14.0).gap(12.0)
         .child(text("Picture Edit — preview, then Apply to Camera".to_owned()).w_full().wrap().font(type_::TITLE).color(t.text))
         .child(text("Tune the look like a photo editor. The preview below simulates the change live. Apply sends Brightness/Contrast/Saturation/Sharpness (VISCA A1/A2/49/42) to the selected camera.".to_owned()).w_full().wrap().font(type_::LABEL).color(t.text_secondary))
@@ -460,18 +494,14 @@ fn picture_page(s: &App, t: rune::tok::Theme, dark: bool, touch: bool) -> El {
                         s.pic_bright = 0; s.pic_contrast = 0; s.pic_sat = 0; s.pic_sharp = 0;
                         s.set_status("Picture sliders reset (camera unchanged)".into());
                     })))
-                .child(hint_card(t, "Mapping: ±100 → Bright 0-14, Contrast 0-14, Sat 0-14 (60-200%), Sharp 0-15. Center = camera 7/7/7/8."))
+                .child(hint_card(t, "Mapping: ±100 → Bright 0-14, Contrast 0-14, Sat 0-14 (60-200%), Sharp 0-15. Center = camera 7/7/4/8 (100% saturation)."))
             )
             .child(col().w_full().gap(8.0)
                 .child(section_title(t, "Live simulated preview"))
                 .child(preview_bars(s, t))
                 .child(preview_gray(s, t))
-                .child(text(format!("Will send: Bright {}  Contrast {}  Sat {}  Sharp {}",
-                    ((7.0 + s.pic_bright as f32 * 0.07).round() as i32).clamp(0,14),
-                    ((7.0 + s.pic_contrast as f32 * 0.07).round() as i32).clamp(0,14),
-                    ((7.0 + s.pic_sat as f32 * 0.07).round() as i32).clamp(0,14),
-                    ((8.0 + s.pic_sharp as f32 * 0.07).round() as i32).clamp(0,15)
-                )).w_full().wrap().font(type_::LABEL).color(t.text_secondary))
+                .child(text(format!("Will send: Bright {}  Contrast {}  Sat {}  Sharp {}", b, c, sat, sharp))
+                    .w_full().wrap().font(type_::LABEL).color(t.text_secondary))
             )
         )
 }
@@ -788,24 +818,25 @@ fn stream_help(s: &App, t: rune::tok::Theme) -> El {
     let ip = cam.ip.clone();
     col().key("streams").w_full().gap(4.0)
         .child(section_title(t, "Streams (open in VLC / OBS / vMix)"))
-        .child(text(format!("Main:  rtsp://{}:554/live/av0", ip)).w_full().wrap().font(type_::MONO_CAPTION).color(t.text))
-        .child(text(format!("Sub:   rtsp://{}:554/live/av1", ip)).w_full().wrap().font(type_::MONO_CAPTION).color(t.text))
+        .child(text(format!("Main:  rtsp://{}:554/1", ip)).w_full().wrap().font(type_::MONO_CAPTION).color(t.text))
+        .child(text(format!("Sub:   rtsp://{}:554/2", ip)).w_full().wrap().font(type_::MONO_CAPTION).color(t.text))
         .child(text(format!("RTMP:  rtmp://{}:1935/live/av0", ip)).w_full().wrap().font(type_::MONO_CAPTION).color(t.text))
         .child(text(format!("Web UI: http://{}  ({} / {})", ip, s.current().username, "•••")).w_full().wrap().font(type_::MONO_CAPTION).color(t.text))
-        .child(hint_card(t, "Video inside this app is control-only: FoMaKo streams via RTSP/RTMP/SRT/NDI (manual §4.3). Keep VLC open beside the controller, or paste the RTSP into OBS as a Media Source."))
+        .child(hint_card(t, "The in-app preview is ~1 frame/sec for aiming. For full-motion video, keep VLC/OBS open beside the controller or paste the RTSP URL into OBS as a Media Source."))
 }
 
 // ---------------------------------------------------------------- help
 
-fn help_page(s: &App, t: rune::tok::Theme, _dark: bool) -> El {
+fn help_page(s: &App, t: rune::tok::Theme, _dark: bool, touch: bool) -> El {
     let ffmpeg_line = if s.ffmpeg_path.is_empty() {
-        "ffmpeg: NOT FOUND — install it (apt install ffmpeg / brew install ffmpeg / winget install ffmpeg), drop ffmpeg(.exe) next to the app, or point FFMPEG_BIN at it. No preview until then.".to_string()
+        "ffmpeg: NOT FOUND — the HTTP JPEG preview still works; install ffmpeg only for RTSP fallback (apt install ffmpeg / brew install ffmpeg / winget install ffmpeg).".to_string()
     } else {
-        format!("ffmpeg: found at {} — preview should work.", s.ffmpeg_path)
+        format!("ffmpeg: found at {} — RTSP fallback is available.", s.ffmpeg_path)
     };
     col().key("help").w_full().px(16.0).py(14.0).gap(10.0)
         .child(text("Help — church setup in 5 minutes".to_owned()).font(type_::TITLE).color(t.text))
-        .child(help_card(t, "0. Live picture", &format!("The Control page shows a ~1 frame/sec preview grabbed with ffmpeg from rtsp://camera:554/live/av0. {ffmpeg_line}")))
+        .child(update_card(s, t, _dark, touch))
+        .child(help_card(t, "0. Live picture", &format!("The Control page shows a ~1 frame/sec JPEG preview from http://camera/action_snapshot. RTSP/ffmpeg is only a fallback for older firmware. {ffmpeg_line}")))
         .child(help_card(t, "1. Wire it",
             "HDMI → TV to see menus (press MENU on the IR remote). LAN → same router/switch as this PC. Power on: camera sweeps left, zooms far→near, then returns to Preset 0 if saved. LCD shows its IP (default 192.168.5.163 if no DHCP)."))
         .child(help_card(t, "2. Lock the IP",
@@ -825,4 +856,84 @@ fn help_card(t: rune::tok::Theme, title: &str, body: &str) -> El {
     col().key(format!("help-{}", title)).w_full().padding(12.0).gap(4.0).radius(8.0).fill(t.card).border(1.0, t.card_border)
         .child(text(title.to_owned()).font(type_::BODY).color(t.text))
         .child(text(body.to_owned()).w_full().wrap().font(type_::LABEL).color(t.text_secondary))
+}
+
+/// App updates: version, what the updater is doing, and the one button that
+/// matters right now. Installs only on a click; a restart is a separate click
+/// so nobody's service gets interrupted by a download finishing.
+fn update_card(s: &App, t: rune::tok::Theme, dark: bool, touch: bool) -> El {
+    let bh = if touch { 44.0 } else { 30.0 };
+    let mut actions = row().w_full().gap(8.0).center_y().flex_wrap();
+    match s.update_phase {
+        UpdatePhase::Checking => {
+            actions = actions.child(btn_labeled(
+                "Checking…", "Checking GitHub for updates", "update-checking",
+                t, 132.0, bh, |_s: &mut App| {},
+            ));
+        }
+        UpdatePhase::Downloading => {
+            actions = actions.child(btn_labeled(
+                "Downloading…", "Update download in progress", "update-busy",
+                t, 150.0, bh, |_s: &mut App| {},
+            ));
+        }
+        UpdatePhase::Available => {
+            // Browsers get the new build when the relay serves it: reload, not swap.
+            #[cfg(not(target_arch = "wasm32"))]
+            let primary = accent_btn_labeled(
+                &format!("Install v{}", s.update_version),
+                "Download, verify and install the new version",
+                "update-install", dark, 168.0, bh,
+                |s: &mut App| update::start_install(s),
+            );
+            #[cfg(target_arch = "wasm32")]
+            let primary = accent_btn_labeled(
+                &format!("Reload for v{}", s.update_version),
+                "Reload this page to pick up the new build",
+                "update-install", dark, 168.0, bh,
+                |s: &mut App| update::restart(s),
+            );
+            actions = actions.child(primary).child(btn_labeled(
+                "Check again", "Check GitHub for updates again", "update-recheck",
+                t, 120.0, bh, |s: &mut App| update::start_check(s),
+            ));
+        }
+        UpdatePhase::Ready => {
+            actions = actions.child(accent_btn_labeled(
+                "Restart now", "Restart the app to use the new version", "update-restart",
+                dark, 140.0, bh, |s: &mut App| update::restart(s),
+            ));
+        }
+        UpdatePhase::Idle | UpdatePhase::Failed => {
+            actions = actions.child(btn_labeled(
+                "Check for updates", "Check GitHub for a newer release", "update-check",
+                t, 168.0, bh, |s: &mut App| update::start_check(s),
+            ));
+        }
+    }
+    actions = actions.child(link_btn(
+        "Release page", "Open the release page in your browser",
+        "update-releases", update::RELEASES_URL, t, bh,
+    ));
+
+    let platform_note = if update::asset_name().is_none() {
+        format!(
+            "This build ({} / {}) has no one-click download — take it from the release page.",
+            std::env::consts::OS,
+            std::env::consts::ARCH
+        )
+    } else {
+        "Installs over this copy only: cameras and fomako-cameras.json stay put. The app checks at launch and every 6 hours; it never installs or restarts on its own."
+            .to_string()
+    };
+
+    col().key("help-app-updates").w_full().padding(12.0).gap(6.0).radius(8.0)
+        .fill(t.card).border(1.0, t.card_border)
+        .child(row().w_full().gap(6.0).center_y().flex_wrap()
+            .child(text("App updates".to_owned()).font(type_::BODY).color(t.text))
+            .child(text(format!("v{}", update::current())).font(type_::MONO_CAPTION).color(t.text_secondary)))
+        .child(text(s.update_msg.clone()).w_full().wrap().role("status")
+            .live_region(rune::LiveRegion::Polite).font(type_::LABEL).color(t.text))
+        .child(actions)
+        .child(text(platform_note).w_full().wrap().font(type_::MONO_CAPTION).color(t.text_secondary))
 }

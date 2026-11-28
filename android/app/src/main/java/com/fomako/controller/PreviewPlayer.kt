@@ -2,10 +2,6 @@ package com.fomako.controller
 
 import android.graphics.Bitmap
 import android.graphics.BitmapFactory
-import android.media.MediaPlayer
-import android.net.Uri
-import android.view.SurfaceHolder
-import android.view.SurfaceView
 import androidx.compose.foundation.Image
 import androidx.compose.foundation.background
 import androidx.compose.foundation.border
@@ -24,7 +20,6 @@ import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.OutlinedButton
 import androidx.compose.material3.Text
 import androidx.compose.runtime.Composable
-import androidx.compose.runtime.DisposableEffect
 import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateOf
@@ -36,10 +31,8 @@ import androidx.compose.ui.draw.clip
 import androidx.compose.ui.graphics.asImageBitmap
 import androidx.compose.ui.layout.ContentScale
 import androidx.compose.ui.platform.LocalConfiguration
-import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.unit.dp
-import androidx.compose.ui.viewinterop.AndroidView
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.isActive
@@ -47,13 +40,14 @@ import kotlinx.coroutines.withContext
 import java.net.HttpURLConnection
 import java.net.URL
 import java.net.URLEncoder
+import org.json.JSONObject
 
 fun buildRtspUrl(cam: CameraConfig): String {
     val enc = { s: String -> URLEncoder.encode(s, "UTF-8").replace("+", "%20") }
     return if (cam.username.isBlank()) {
-        "rtsp://${cam.ip}:554/live/av0"
+        "rtsp://${cam.ip}:554/1"
     } else {
-        "rtsp://${enc(cam.username)}:${enc(cam.password)}@${cam.ip}:554/live/av0"
+        "rtsp://${enc(cam.username)}:${enc(cam.password)}@${cam.ip}:554/1"
     }
 }
 
@@ -85,7 +79,10 @@ fun LivePreviewCard(state: ControllerState) {
                 modifier = Modifier.weight(1f),
                 maxLines = 1,
             )
-            OutlinedButton(onClick = { state.previewOn = !state.previewOn }) {
+            OutlinedButton(onClick = {
+                state.previewOn = !state.previewOn
+                state.previewStatus = if (state.previewOn) "Preview starting…" else "Preview paused"
+            }) {
                 Text(if (state.previewOn) "Pause" else "Resume")
             }
         }
@@ -104,7 +101,6 @@ fun LivePreviewCard(state: ControllerState) {
             contentAlignment = Alignment.Center
         ) {
             if (!state.previewOn) {
-                state.previewStatus = "Preview paused"
                 Text(
                     "Preview paused",
                     color = MaterialTheme.colorScheme.onSurfaceVariant,
@@ -113,7 +109,7 @@ fun LivePreviewCard(state: ControllerState) {
             } else if (useRelaySnap) {
                 RelaySnapshotView(state, cam, relay)
             } else {
-                DirectRtspView(state, cam)
+                DirectSnapshotView(state, cam)
             }
         }
 
@@ -121,7 +117,7 @@ fun LivePreviewCard(state: ControllerState) {
             text = if (useRelaySnap) {
                 "Relay JPEG preview (~1 frame/sec via $relay)."
             } else {
-                "Direct RTSP preview (rtsp://${cam.ip}:554/live/av0). Check camera login on Cameras tab if auth fails."
+                "Direct JPEG preview (http://${cam.ip}/action_snapshot, ~1 frame/sec)."
             },
             style = MaterialTheme.typography.labelSmall,
             color = MaterialTheme.colorScheme.onSurfaceVariant,
@@ -130,84 +126,61 @@ fun LivePreviewCard(state: ControllerState) {
 }
 
 @Composable
-private fun DirectRtspView(state: ControllerState, cam: CameraConfig) {
-    val context = LocalContext.current
-    val rtspUrl = remember(cam.ip, cam.username, cam.password) { buildRtspUrl(cam) }
-    var surfaceReady by remember { mutableStateOf<SurfaceHolder?>(null) }
-
-    DisposableEffect(rtspUrl, surfaceReady) {
-        val holder = surfaceReady
-        if (holder == null) {
-            onDispose { }
-        } else {
-            state.previewStatus = "Connecting RTSP ${cam.ip}…"
-            val player = MediaPlayer()
-            var released = false
-            runCatching {
-                player.setDisplay(holder)
-                player.setDataSource(context, Uri.parse(rtspUrl))
-                player.setOnPreparedListener { mp ->
-                    if (!released) {
-                        state.previewStatus = "live RTSP · ${cam.ip}"
-                        mp.start()
-                    }
-                }
-                player.setOnErrorListener { _, what, extra ->
-                    if (!released) {
-                        state.previewStatus = "RTSP error ($what/$extra) — check WiFi/login"
-                    }
-                    true
-                }
-                player.prepareAsync()
-            }.onFailure { e ->
-                state.previewStatus = "RTSP: ${e.message ?: "failed"}"
-            }
-            onDispose {
-                released = true
-                runCatching { player.stop() }
-                runCatching { player.release() }
-            }
-        }
-    }
-
-    AndroidView(
-        factory = { ctx ->
-            SurfaceView(ctx).apply {
-                holder.addCallback(object : SurfaceHolder.Callback {
-                    override fun surfaceCreated(h: SurfaceHolder) {
-                        surfaceReady = h
-                    }
-                    override fun surfaceChanged(h: SurfaceHolder, f: Int, w: Int, ht: Int) {}
-                    override fun surfaceDestroyed(h: SurfaceHolder) {
-                        if (surfaceReady == h) surfaceReady = null
-                    }
-                })
-            }
-        },
-        modifier = Modifier.fillMaxSize()
+private fun DirectSnapshotView(state: ControllerState, cam: CameraConfig) {
+    val endpoint = "http://${cam.ip}"
+    HttpSnapshotView(
+        state = state,
+        cam = cam,
+        endpoint = endpoint,
+        urlFor = { seq -> "$endpoint/action_snapshot?t=$seq" },
     )
 }
 
 @Composable
 private fun RelaySnapshotView(state: ControllerState, cam: CameraConfig, relay: String) {
-    var bitmap by remember { mutableStateOf<Bitmap?>(null) }
+    HttpSnapshotView(
+        state = state,
+        cam = cam,
+        endpoint = relay,
+        urlFor = { seq ->
+            val user = URLEncoder.encode(cam.username, "UTF-8")
+            val password = URLEncoder.encode(cam.password, "UTF-8")
+            val ip = URLEncoder.encode(cam.ip, "UTF-8")
+            "$relay/api/snapshot?ip=$ip&user=$user&pass=$password&seq=$seq"
+        },
+    )
+}
 
-    LaunchedEffect(cam.ip, cam.username, cam.password, relay) {
+@Composable
+private fun HttpSnapshotView(
+    state: ControllerState,
+    cam: CameraConfig,
+    endpoint: String,
+    urlFor: (Long) -> String,
+) {
+    var bitmap by remember(endpoint, cam.ip, cam.username, cam.password) { mutableStateOf<Bitmap?>(null) }
+
+    LaunchedEffect(endpoint, cam.ip, cam.username, cam.password) {
         var frames = 0
-        state.previewStatus = "Connecting relay ${cam.ip}…"
+        state.previewStatus = "Connecting ${cam.ip}…"
         while (isActive) {
             val result = withContext(Dispatchers.IO) {
                 runCatching {
-                    val u = URLEncoder.encode(cam.username, "UTF-8")
-                    val p = URLEncoder.encode(cam.password, "UTF-8")
-                    val conn = (URL("$relay/api/snapshot?ip=${cam.ip}&user=$u&pass=$p").openConnection() as HttpURLConnection).apply {
-                        connectTimeout = 3000
-                        readTimeout = 8000
+                    val conn = URL(urlFor(System.currentTimeMillis())).openConnection() as HttpURLConnection
+                    try {
+                        conn.connectTimeout = 3000
+                        conn.readTimeout = 12_000
+                        val code = conn.responseCode
+                        if (code != 200) {
+                            val body = conn.errorStream?.bufferedReader()?.readText().orEmpty()
+                            val detail = runCatching { JSONObject(body).optString("error", body) }.getOrDefault(body)
+                            error(if (detail.isBlank()) "HTTP $code" else detail)
+                        }
+                        val bytes = conn.inputStream.use { it.readBytes() }
+                        BitmapFactory.decodeByteArray(bytes, 0, bytes.size) ?: error("camera returned a bad JPEG")
+                    } finally {
+                        conn.disconnect()
                     }
-                    val code = conn.responseCode
-                    if (code != 200) error("HTTP $code")
-                    val bytes = conn.inputStream.use { it.readBytes() }
-                    BitmapFactory.decodeByteArray(bytes, 0, bytes.size) ?: error("bad jpeg")
                 }
             }
             if (result.isSuccess) {
