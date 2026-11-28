@@ -10,9 +10,10 @@ Manual: [FoMaKo NDI/SDI/HDMI PTZ User Manual V3.0 (PDF)](https://fomako.net/uplo
 
 ## What it does
 
-- **Control page**: PTZ pad (↖ ↑ ↗ ← HOME → ↙ ↓ ↘ + STOP), Zoom Tele/Wide + Stop, Focus Near/Far + Auto/Manual/1-Push, Pan/Tilt/Zoom speeds, Power ON/Standby, Presets 0–254 (quick 0–9 grid), multi-camera switcher, **live preview** (~1 frame/sec JPEG snapshots from the camera's HTTP endpoint, with RTSP/ffmpeg fallback for older firmware).
+- **Control page**: PTZ pad (↖ ↑ ↗ ← HOME → ↙ ↓ ↘ + STOP), Zoom Tele/Wide + Stop, Focus Near/Far + Auto/Manual/1-Push, Pan/Tilt/Zoom speeds, Power ON/Standby, Presets 0–254 (quick 0–9 grid), multi-camera switcher, **live preview** (~1 frame/sec JPEG snapshots from the camera's HTTP endpoint, with RTSP/ffmpeg fallback for older firmware), and **AI auto tracking** on models that have it (Tracking ON/OFF + real-time/area mode, see below).
 - **Image page**: every FoMaKo setting from manual §5.2 — Exposure (Full Auto/Manual/Shutter/Iris/Bright), Shutter, Iris, Gain limit, Bright, ExpComp, Backlight, WDR, NR 2D/3D, Flicker, Gamma, Low-light, Aperture/Sharpness, Brightness, Contrast, Saturation (60–200%), WB + R/B Gain, Flip H/V, B/W, etc. Each row sends real VISCA.
 - **Picture Edit**: photo-style Brightness / Contrast / Saturation / Sharpness sliders (-100…+100) with **live simulated preview** (color bars + gray ramp). **Apply to Camera** sends VISCA A1/A2/49/42. This is the “make the picture look like I want” feature.
+- **Match a picture (image look)**: load a reference photo and the **app** measures it (brightness, contrast, saturation, detail, warmth) and tunes the camera’s picture settings to match — Brightness, Contrast, Saturation and Sharpness, plus optional colour via R/B Gain. **Match now** does one pass; **Auto match** keeps nudging about every 2.5 s while the preview runs. This changes image settings only: the camera’s position never moves. Separate from the camera’s own AI tracking below.
 - **Cameras page**: **auto-find** (subnet scan: TCP 5678 + UDP 52381 + HTTP sniff + ONVIF discovery, one-tap Add), add/remove, Select, Test (sends Stop + shows ACK), protocol toggle (Sony VISCA UDP :52381 recommended, or IP-VISCA TCP :5678), **per-camera login** (RTSP/web use it; VISCA needs none), saved to `fomako-cameras.json` beside the app (copy to every booth PC). Shows RTSP/RTMP/Web UI URLs for VLC/OBS/vMix.
 - **Android (Native APK — recommended for Android)**: standalone Jetpack Compose app (`android/`) powered by the Rust VISCA & LAN discovery engine via JNI (`src/android_jni.rs`). Connects **directly** over WiFi to FoMaKo cameras (Sony VISCA UDP `:52381`, IP-VISCA TCP `:5678`, ONVIF + subnet scan, direct JPEG preview) with **no PC or relay needed** (optional relay toggle included). Build with `scripts/build-android.sh` → `dist/fomako-church-controller-android.apk`.
 - **Phones (iPhone / Android browser)**: open the web build in the phone browser (same WiFi). Because Android Chrome requires HTTPS for WebGPU on LAN IPs, pass `--https` to the LAN relay: `python3 scripts/visca-relay.py --port 8443 --https --serve-web dist/web`, then open the printed `https://<PC-LAN-IP>:8443/#relay=...&subnet=...&autostart=scan` URL (accept the self-signed cert prompt once; put the URL in a booth QR code). Rune has no native Android/iOS backend yet (`web → iOS → Android`), so the native Android app uses Jetpack Compose + Rust JNI while iOS uses the browser + relay path.
@@ -25,6 +26,25 @@ Manual: [FoMaKo NDI/SDI/HDMI PTZ User Manual V3.0 (PDF)](https://fomako.net/uplo
 - Sony Visca port **52381** (UDP, `01 00 len seq + payload`)
 - Onvif **2000**, user `admin` / `admin`, default IP `192.168.5.163`, LCD shows DHCP IP
 - RTSP `rtsp://IP:554/1` (main) / `rtsp://IP:554/2` (sub); some older firmware uses `/live/av0` and `/live/av1`. RTMP `rtmp://IP:1935/live/av0`, SRT `:9000`, NDI (NDI models)
+
+### Match a picture (image look — app-side analysis)
+
+Picture Edit → **Match a picture** takes a reference image and makes the camera's picture match it. The app reads the file locally, measures brightness (mean luma), contrast (luma standard deviation), saturation (mean chroma), detail (mean neighbour gradient) and warmth (red-vs-blue balance), then compares those against the live preview frame. It only changes image settings:
+
+- Brightness → VISCA A1, Contrast → A2, Saturation → 49, Sharpness/Aperture → 42
+- Optional **Colour** matching → WB Manual (35) with R/B Gain trims (43/44)
+
+**Match now** does one closed-loop pass; **Auto match** repeats every ~2.5 s so gradual lighting changes are followed. Nothing here pans, tilts or zooms — that is the separate camera AI tracking feature below. Colour matching leaves WB in Manual, so set it back to Auto on the Image page when you're done. Drop reference pictures into the app's `looks/` folder (or type a path and press Load); Picture Edit lists up to eight as one-tap buttons. The app reads the file locally — it is never uploaded to the camera.
+
+### AI auto tracking (AI-tracking models)
+
+FoMaKo's AI-tracking models (FMK/K600/K630 Gen 3 and similar) do the following inside the camera. The Control page has a **Tracking ON / Tracking OFF** card that sends the documented command from the K600/K630 manual §5.2:
+
+- Real-time tracking ON — `81 0A 01 32 00 00 02 00 FF`
+- Area tracking ON — `81 0A 01 32 00 00 02 01 FF`
+- Tracking OFF — `81 0A 01 32 00 00 03 00 FF`
+
+Real-time mode follows one person; press **F4** on the IR remote (or click their box in the camera's web page) to switch target. Area mode follows movement inside up to four areas, which are configured in the camera web page first (at least two). While tracking is on the camera ignores pan/tilt — the app's status line says so, and **Tracking OFF** hands control back. Non-AI models reject the command; `Cameras → Test` shows the camera's answer.
 
 ### Live preview + camera passwords
 

@@ -222,6 +222,32 @@ private fun ZoomFocusPowerCard(state: ControllerState) {
                     modifier = Modifier.weight(1f).defaultMinSize(minHeight = 48.dp)
                 ) { Text("Standby") }
             }
+
+            // Camera-side AI tracking (AI-tracking models only). While it runs the
+            // camera ignores pan/tilt; switch target with F4 on the IR remote.
+            SectionHeading("AI auto tracking")
+            Row(modifier = Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+                Button(
+                    onClick = { state.sendVisca("AI Tracking ON", "tracking", 1, 0) },
+                    modifier = Modifier.weight(1f).defaultMinSize(minHeight = 48.dp)
+                        .semantics { contentDescription = "Turn AI tracking on" }
+                ) { Text("Track ON") }
+                OutlinedButton(
+                    onClick = { state.sendVisca("AI Area Tracking ON", "tracking", 1, 1) },
+                    modifier = Modifier.weight(1f).defaultMinSize(minHeight = 48.dp)
+                        .semantics { contentDescription = "Turn AI area tracking on" }
+                ) { Text("Area") }
+                OutlinedButton(
+                    onClick = { state.sendVisca("AI Tracking OFF", "tracking", 0, 0) },
+                    modifier = Modifier.weight(1f).defaultMinSize(minHeight = 48.dp)
+                        .semantics { contentDescription = "Turn AI tracking off" }
+                ) { Text("OFF") }
+            }
+            Text(
+                "Real-time follows one person (F4 switches target). Area needs areas saved in the camera web page. PTZ is locked while tracking runs.",
+                style = MaterialTheme.typography.bodySmall,
+                color = MaterialTheme.colorScheme.onSurfaceVariant
+            )
         }
     }
 }

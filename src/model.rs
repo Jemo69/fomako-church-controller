@@ -148,6 +148,29 @@ pub struct App {
     pub pic_sharp: i32,
     pub preset_sel: u8,
 
+    // Camera-side AI tracking (FoMaKo AI-tracking models, manual §5.2)..
+    pub track_on: bool,
+    /// false = real-time tracking, true = area tracking.
+    pub track_area: bool,
+    pub track_status: String,
+
+    // "Match this picture" (src/look.rs): a reference image drives the camera's
+    // picture settings. Independent of the camera's AI tracking above.
+    pub look_target: Option<crate::look::Stats>,
+    pub look_live: Option<crate::look::Stats>,
+    pub look_label: String,
+    pub look_status: String,
+    pub look_image: Option<rune::Image>,
+    pub look_bytes: Option<std::sync::Arc<[u8]>>,
+    pub look_path: TextEdit,
+    /// Pictures found in ./looks, shown as one-tap buttons.
+    pub look_files: Vec<String>,
+    /// Continuously nudge the camera toward the reference look.
+    pub look_auto: bool,
+    /// Also match colour with R/B gain (switches WB to Manual).
+    pub look_color: bool,
+    pub look_next_at: f64,
+
     // network auto-discovery
     pub scan_prefix: TextEdit,
     pub scan: Option<ScanState>,
@@ -277,6 +300,20 @@ impl App {
             pic_sat: 0,
             pic_sharp: 0,
             preset_sel: 1,
+            track_on: false,
+            track_area: false,
+            track_status: "Off — camera aims manually".to_string(),
+            look_target: None,
+            look_live: None,
+            look_label: String::new(),
+            look_status: "Load a picture and the app tunes the camera to match it".to_string(),
+            look_image: None,
+            look_bytes: None,
+            look_path: TextEdit::new(""),
+            look_files: Vec::new(),
+            look_auto: false,
+            look_color: false,
+            look_next_at: 0.0,
             scan_prefix: TextEdit::new(crate::discover::detect_prefix()),
             scan: None,
             relay_url: TextEdit::new(""),
@@ -321,12 +358,24 @@ impl App {
         if s.cameras.is_empty() {
             s.cameras.push(CameraConfig::default());
         }
+        #[cfg(not(target_arch = "wasm32"))]
+        {
+            s.look_files = crate::look::list_pictures("looks");
+        }
         s.push_log("FoMaKo controller started (VISCA 52381 / 5678, admin/admin)".into());
         s
     }
 
     pub fn current(&self) -> &CameraConfig {
         &self.cameras[self.selected.min(self.cameras.len().saturating_sub(1))]
+    }
+
+    /// Switch cameras. AI tracking lives in the camera, so selecting another one
+    /// always leaves tracking off until it is switched on again.
+    pub fn select_camera(&mut self, i: usize) {
+        self.selected = i.min(self.cameras.len().saturating_sub(1));
+        self.track_on = false;
+        self.track_status = "Off — camera aims manually".to_string();
     }
 
     pub fn push_log(&mut self, msg: String) {

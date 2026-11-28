@@ -198,6 +198,23 @@ pub fn contrast_direct(address: u8, v: u8) -> Vec<u8> {
     let a = addr_byte(address);
     vec![a, 0x01, 0x04, 0xA2, 0x00, 0x00, (v >> 4) & 0x0F, v & 0x0F, 0xFF]
 }
+/// Built-in AI tracking (manual §5.2 "Tracking"): 8x 0A 01 32 00 00 0X 0Y FF.
+/// X: 0x02 ON, 0x03 OFF. Y: 0x00 real-time tracking, 0x01 area tracking.
+/// While tracking is on the camera ignores pan/tilt commands; the operator
+/// switches target with F4 on the IR remote (or the person box in the web UI).
+pub fn tracking(address: u8, on: bool, area: bool) -> Vec<u8> {
+    vec![
+        addr_byte(address),
+        0x0A,
+        0x01,
+        0x32,
+        0x00,
+        0x00,
+        if on { 0x02 } else { 0x03 },
+        if area { 0x01 } else { 0x00 },
+        0xFF,
+    ]
+}
 /// p = 0..=14 (60%..200%)
 pub fn saturation(address: u8, p: u8) -> Vec<u8> {
     vec![addr_byte(address), 0x01, 0x04, 0x49, 0x00, 0x00, 0x00, p.min(14) & 0x0F, 0xFF]
@@ -282,6 +299,7 @@ pub fn named_command(op: &str, addr: u8, a: i32, b: i32, c: i32) -> Option<Vec<u
         "bgain" => bgain(addr, a_u8),
         "flip" => flip(addr, a_u8),
         "bw" => picture_bw(addr, a != 0),
+        "tracking" => tracking(addr, a != 0, b != 0),
         _ => return None,
     })
 }
@@ -403,6 +421,26 @@ mod tests {
     fn presets() {
         assert_eq!(preset_set(1, 5), vec![0x81, 0x01, 0x04, 0x3F, 0x01, 0x05, 0xFF]);
         assert_eq!(preset_recall(1, 5), vec![0x81, 0x01, 0x04, 0x3F, 0x02, 0x05, 0xFF]);
+    }
+
+    #[test]
+    fn tracking_commands_match_the_manual() {
+        assert_eq!(
+            tracking(1, true, false),
+            vec![0x81, 0x0A, 0x01, 0x32, 0x00, 0x00, 0x02, 0x00, 0xFF]
+        );
+        assert_eq!(
+            tracking(2, true, true),
+            vec![0x82, 0x0A, 0x01, 0x32, 0x00, 0x00, 0x02, 0x01, 0xFF]
+        );
+        assert_eq!(
+            tracking(1, false, false),
+            vec![0x81, 0x0A, 0x01, 0x32, 0x00, 0x00, 0x03, 0x00, 0xFF]
+        );
+        assert_eq!(
+            named_command("tracking", 1, 1, 1, 0),
+            Some(vec![0x81, 0x0A, 0x01, 0x32, 0x00, 0x00, 0x02, 0x01, 0xFF])
+        );
     }
 
     #[test]

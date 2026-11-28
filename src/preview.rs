@@ -601,6 +601,10 @@ pub fn poll(app: &mut App, _clock: f64, tx: &mut rune::Tx) -> bool {
                 app.preview_frames = seq;
                 app.preview_error.clear();
                 app.preview_ready = false;
+                // "Match picture" needs live statistics from the same frames.
+                if app.look_target.is_some() {
+                    app.look_live = crate::look::analyze_bytes(&jpeg).ok();
+                }
                 if let Some(cache) = app.preview_cache.as_ref() {
                     app.preview_image = Some(cache.load(jpeg));
                     app.preview_status = format!("decoding frame {} …", seq);
@@ -616,6 +620,7 @@ pub fn poll(app: &mut App, _clock: f64, tx: &mut rune::Tx) -> bool {
             PreviewUpdate::Error { seq, msg, .. } => {
                 app.preview_frames = seq;
                 app.preview_error = msg.clone();
+                app.look_live = None;
                 app.preview_status = format!("retrying… {}", msg.chars().take(120).collect::<String>());
                 #[cfg(target_arch = "wasm32")]
                 {
