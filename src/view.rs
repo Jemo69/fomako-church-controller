@@ -321,9 +321,9 @@ fn control_page(s: &App, t: rune::tok::Theme, dark: bool, touch: bool) -> El {
     let bh = if touch { 44.0 } else { 32.0 };
     col().key("control").w_full().px(16.0).py(14.0).gap(14.0)
         .child(camera_switcher(s, t, touch))
+        .child(tracking_card(s, t, dark, touch))
         .child(follow_card(s, t, dark, bh))
         .child(preview_pane(s, t, touch))
-        .child(tracking_card(s, t, dark, touch))
         .child(row().w_full().gap(14.0).flex_wrap()
             .child(ptz_pad(t, touch))
             .child(col().gap(10.0).grow(1.0).min_w(240.0)
@@ -435,7 +435,7 @@ fn follow_card(s: &App, t: rune::tok::Theme, dark: bool, bh: f32) -> El {
         .child(row().w_full().gap(8.0).center_y().flex_wrap()
             .child(section_title(t, "Cross-camera AI follow"))
             .child(text(s.follow_status.clone()).font(type_::LABEL).color(t.text_secondary).grow(1.0).min_w(120.0).wrap()))
-        .child(text("Point both cameras at the same landmark, Calibrate, then Start. The leader's built-in AI tracking drives the follower's pan/tilt over VISCA. Turn the follower's own AI tracking OFF so the two don't fight.".to_owned())
+        .child(text("Turn AI tracking ON for the leader (card above) and OFF for the follower. Point both cameras at the same landmark, Calibrate, then Start. The leader's tracking then drives the follower's pan/tilt over VISCA.".to_owned())
             .w_full().wrap().font(type_::LABEL).color(t.text_secondary));
 
     if names.len() < 2 {
@@ -1199,7 +1199,7 @@ fn help_page(s: &App, t: rune::tok::Theme, _dark: bool, touch: bool) -> El {
         .child(help_card(t, "7. Match a picture",
             "Picture Edit → Match a picture loads a reference photo and tunes the camera's image settings to match it: the app measures brightness, contrast, saturation, detail and warmth, then sends VISCA A1 (Brightness), A2 (Contrast), 49 (Saturation) and 42 (Sharpness). Colour matching optionally trims R/B Gain (43/44) in Manual WB. Match now = one pass; Auto match = repeat every ~2.5 s. This never moves the camera — it is separate from AI tracking."))
         .child(help_card(t, "8. Cross-camera AI follow",
-            "Only Gen-3 AI models auto-track on their own. Enable AI tracking on the leader (remote F2 or the camera web page). Point both cameras at the same landmark, press Calibrate, then Start. The follower repeats the leader's pan/tilt aim. Turn the follower's own AI tracking OFF. Works while both cameras see the subject; it is an aim mapping, not shared subject coordinates — the cameras expose no tracking data over VISCA."))
+            "Only Gen-3 AI models auto-track on their own. Turn Tracking ON for the leader and OFF for the follower. Point both cameras at the same landmark, press Calibrate, then Start. The follower repeats the leader's pan/tilt aim. Works while both cameras see the subject; it is an aim mapping, not shared subject coordinates — the cameras expose no subject data or tracking-status query over VISCA."))
         .child(help_card(t, "Manual",
             "FoMaKo NDI/SDI/HDMI PTZ User Manual V3.0 (PDF): https://fomako.net/uploads/20230817/fd1bfd181b89ae798bee1f7ed260a7b3.pdf — §§3 remote+menu, 4 network/streaming, 5 VISCA/Pelco lists. IR: * # 7 shows IP, # # # clears presets, * # 6 factory reset."))
         .child(hint_card(t, "Built with Rune (Rust GPU UI, anomalyco/rune). Runs on Windows / macOS / Linux. Config fomako-cameras.json sits beside the app — copy it to every booth PC."))
