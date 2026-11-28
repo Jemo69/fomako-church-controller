@@ -6,6 +6,7 @@ use rune::TextEdit;
 use serde::{Deserialize, Serialize};
 
 use crate::discover::{FoundCamera, ScanEvent, ScanHandle};
+use crate::update::{UpdateEvent, UpdatePhase};
 use crate::visca::Protocol;
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -157,7 +158,7 @@ pub struct App {
     /// Read on web; kept on desktop for shape parity.
     #[allow(dead_code)]
     pub autostart_scan: bool,
-    // Live preview (ffmpeg snapshots natively, relay snapshots on web).
+    // Live preview (HTTP JPEG natively, relay snapshots on web).
     pub preview_on: bool,
     pub preview_ip: String,
     pub preview_user: String,
@@ -180,6 +181,34 @@ pub struct App {
     pub preview_fetching: bool,
     #[cfg(target_arch = "wasm32")]
     pub preview_next_at: f64,
+    #[cfg(target_arch = "wasm32")]
+    pub action_slot: Arc<Mutex<Option<ActionReply>>>,
+    #[cfg(target_arch = "wasm32")]
+    pub action_waker: Option<rune::Waker>,
+
+    // Auto-updater (see src/update.rs): check GitHub releases, install on click.
+    pub update_phase: UpdatePhase,
+    pub update_msg: String,
+    /// Version offered by the latest release (empty until a check finds one).
+    pub update_version: String,
+    pub update_url: String,
+    pub update_sums_url: String,
+    pub update_release_url: String,
+    pub update_asset: String,
+    /// Bytes downloaded so far (shown during download).
+    pub update_done: u64,
+    /// Path of the installed binary, once the swap happened.
+    pub update_ready_path: String,
+    /// Seconds on the poll clock; 0 disables the scheduled check.
+    pub update_next_check: f64,
+    pub update_slot: Arc<Mutex<Vec<UpdateEvent>>>,
+    pub update_waker: Option<rune::Waker>,
+}
+
+#[derive(Clone, Debug)]
+pub struct ActionReply {
+    pub what: String,
+    pub result: Result<String, String>,
 }
 
 #[derive(Clone, Debug)]
@@ -236,7 +265,7 @@ impl App {
             aperture: 8,
             brightness: 7,
             contrast: 7,
-            saturation: 7,
+            saturation: 4,
             wb_mode: 0,
             awb_sens: 1,
             r_gain: 32,
@@ -271,6 +300,23 @@ impl App {
             preview_fetching: false,
             #[cfg(target_arch = "wasm32")]
             preview_next_at: 0.0,
+            #[cfg(target_arch = "wasm32")]
+            action_slot: Arc::new(Mutex::new(None)),
+            #[cfg(target_arch = "wasm32")]
+            action_waker: None,
+            update_phase: UpdatePhase::Idle,
+            update_msg: "Not checked yet — the app looks for a newer release a few seconds after launch."
+                .to_string(),
+            update_version: String::new(),
+            update_url: String::new(),
+            update_sums_url: String::new(),
+            update_release_url: crate::update::RELEASES_URL.to_string(),
+            update_asset: String::new(),
+            update_done: 0,
+            update_ready_path: String::new(),
+            update_next_check: 4.0,
+            update_slot: Arc::new(Mutex::new(Vec::new())),
+            update_waker: None,
         };
         if s.cameras.is_empty() {
             s.cameras.push(CameraConfig::default());

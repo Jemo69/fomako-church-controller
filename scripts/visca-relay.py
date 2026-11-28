@@ -28,6 +28,7 @@ import subprocess
 import sys
 import time
 import urllib.parse
+import urllib.request
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 
@@ -56,6 +57,7 @@ class Handler(BaseHTTPRequestHandler):
         body = json.dumps(obj).encode()
         self.send_response(code)
         self.send_header("Content-Type", "application/json")
+        self.send_header("Cache-Control", "no-store")
         self.send_header("Content-Length", str(len(body)))
         self.end_headers()
         self.wfile.write(body)
@@ -83,9 +85,9 @@ class Handler(BaseHTTPRequestHandler):
                 port = int((q.get("port", ["554"])[0] or "554"))
             except ValueError:
                 port = 554
-            jpg = grab_snapshot(ip, port, user, pw)
+            jpg, snapshot_error = grab_snapshot(ip, port, user, pw)
             if jpg is None:
-                return self._json({"error": "snapshot failed (camera offline? ffmpeg missing?)"}, 502)
+                return self._json({"error": snapshot_error or "snapshot failed (camera offline? ffmpeg missing?)"}, 502)
             self.send_response(200)
             self.send_header("Content-Type", "image/jpeg")
             self.send_header("Content-Length", str(len(jpg)))
@@ -145,10 +147,14 @@ class Handler(BaseHTTPRequestHandler):
                 s.settimeout(1.0)
                 s.sendto(sony_wrap(payload), (ip, port))
                 try:
-                    n, _ = s.recvfrom(64)
-                    msg = f"sent {len(payload)}B ack {n}B"
+                    reply, _ = s.recvfrom(64)
+                    ack_payload = reply[8:] if len(reply) >= 8 and reply[:2] == b"\x01\x00" else reply
+                    if len(ack_payload) >= 3 and ack_payload[0] == 0x90 and ack_payload[1] == 0x41:
+                        s.close()
+                        return self._json({"ok": False, "error": f"camera rejected command ({ack_payload.hex(' ')})"}, 502)
+                    msg = f"sent {len(payload)}B ack {len(reply)}B"
                 except socket.timeout:
-                    msg = f"sent {len(payload)}B (no ack, ok on LAN)"
+                    msg = f"sent {len(payload)}B (no ACK)"
                 s.close()
             else:
                 s = socket.create_connection((ip, port), timeout=1.5)
@@ -171,26 +177,73 @@ def _userinfo(user: str, pw: str) -> str:
     return f"{q(user)}:{q(pw)}@"
 
 
+def grab_http_snapshot(ip: str, user: str = "", pw: str = "", timeout: int = 5):
+    """Prefer the camera's lightweight JPEG endpoint (works without RTSP)."""
+    handlers = []
+    if user:
+        manager = urllib.request.HTTPPasswordMgrWithDefaultRealm()
+        manager.add_password(None, f"http://{ip}", user, pw)
+        handlers.append(urllib.request.HTTPDigestAuthHandler(manager))
+    opener = urllib.request.build_opener(*handlers)
+    last_error = "HTTP snapshot unavailable"
+    for path in ("/action_snapshot", "/snapshot.jpg"):
+        request = urllib.request.Request(
+            f"http://{ip}{path}?t={time.time_ns()}",
+            headers={"Cache-Control": "no-cache", "User-Agent": "FoMaKoController/0.4"},
+        )
+        try:
+            with opener.open(request, timeout=timeout) as response:
+                data = response.read(8 * 1024 * 1024)
+                if data.startswith(b"\xff\xd8\xff"):
+                    return data, ""
+                last_error = "camera returned a non-JPEG snapshot"
+        except urllib.error.HTTPError as error:
+            last_error = f"HTTP snapshot {error.code}"
+        except Exception as error:
+            last_error = f"HTTP snapshot failed: {type(error).__name__}"
+    return None, last_error
+
+
 def grab_snapshot(ip: str, port: int = 554, user: str = "", pw: str = "", timeout: int = 15):
-    """One JPEG frame from rtsp://[user:pass@]ip:port/live/av0 via ffmpeg. None on failure."""
+    """One JPEG frame from HTTP stills, with RTSP fallback for older firmware."""
     import shutil
     import subprocess
 
+    jpg, http_error = grab_http_snapshot(ip, user, pw)
+    if jpg is not None:
+        return jpg, ""
     if shutil.which("ffmpeg") is None:
-        return None
-    try:
-        p = subprocess.run(
-            ["ffmpeg", "-hide_banner", "-loglevel", "error",
-             "-rtsp_transport", "tcp", "-timeout", "5000000",
-             "-i", f"rtsp://{_userinfo(user, pw)}{ip}:{port}/live/av0",
-             "-skip_frame", "nokey",
-             "-frames:v", "1", "-q:v", "5",
-             "-f", "image2pipe", "-vcodec", "mjpeg", "-"],
-            stdout=subprocess.PIPE, stderr=subprocess.DEVNULL, timeout=timeout,
-        )
-    except Exception:
-        return None
-    return p.stdout if p.returncode == 0 and p.stdout else None
+        return None, f"{http_error}; ffmpeg not found on the relay PC"
+    rtsp_error = "RTSP unavailable"
+    for path in ("1", "live/av0"):
+        try:
+            p = subprocess.run(
+                ["ffmpeg", "-hide_banner", "-loglevel", "error",
+                 "-rtsp_transport", "tcp", "-timeout", "5000000",
+                 "-i", f"rtsp://{_userinfo(user, pw)}{ip}:{port}/{path}",
+                 "-skip_frame", "nokey",
+                 "-frames:v", "1", "-q:v", "5",
+                 "-f", "image2pipe", "-vcodec", "mjpeg", "-"],
+                stdout=subprocess.PIPE, stderr=subprocess.PIPE, timeout=timeout,
+            )
+        except subprocess.TimeoutExpired:
+            rtsp_error = "RTSP timed out — check camera IP/WiFi"
+            continue
+        except Exception as e:
+            rtsp_error = f"could not start ffmpeg: {type(e).__name__}"
+            break
+        if p.returncode == 0 and p.stdout:
+            return p.stdout, ""
+        err = (p.stderr or b"").decode("utf-8", "replace")
+        if "401" in err or "Unauthorized" in err:
+            rtsp_error = "RTSP 401 Unauthorized — check camera login"
+        elif "404" in err or "Not Found" in err:
+            rtsp_error = "RTSP stream not found"
+        elif "timed out" in err.lower() or "timeout" in err.lower():
+            rtsp_error = "RTSP timed out — check camera IP/WiFi"
+        else:
+            rtsp_error = "ffmpeg could not decode RTSP — check camera stream/codec"
+    return None, f"{http_error}; {rtsp_error}"
 
 
 def valid_prefix(p: str) -> bool:

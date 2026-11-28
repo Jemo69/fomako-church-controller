@@ -10,6 +10,7 @@ import androidx.compose.runtime.setValue
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.SupervisorJob
+import kotlinx.coroutines.channels.Channel
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.withContext
 import org.json.JSONArray
@@ -54,9 +55,26 @@ data class ScanHit(
     val onvif: Boolean,
 )
 
+internal data class PictureEditValues(val brightness: Int, val contrast: Int, val saturation: Int, val sharpness: Int)
+
+internal fun pictureEditValues(bright: Int, contrast: Int, sat: Int, sharp: Int) = PictureEditValues(
+    brightness = (7.0f + bright * 0.07f).let { kotlin.math.round(it).toInt().coerceIn(0, 14) },
+    contrast = (7.0f + contrast * 0.07f).let { kotlin.math.round(it).toInt().coerceIn(0, 14) },
+    saturation = (4.0f + sat * 0.10f).let { kotlin.math.round(it).toInt().coerceIn(0, 14) },
+    sharpness = (8.0f + sharp * 0.07f).let { kotlin.math.round(it).toInt().coerceIn(0, 15) },
+)
+
+private data class ViscaCommand(
+    val camera: CameraConfig,
+    val what: String,
+    val payload: ByteArray,
+    val relay: String?,
+)
+
 class ControllerState(private val context: Context) {
     private val scope = CoroutineScope(SupervisorJob() + Dispatchers.Main)
     private val configFile = File(context.filesDir, "fomako-cameras.json")
+    private val viscaQueue = Channel<ViscaCommand>(Channel.UNLIMITED)
 
     val cameras = mutableStateListOf<CameraConfig>()
     var selected by mutableIntStateOf(0)
@@ -90,7 +108,7 @@ class ControllerState(private val context: Context) {
     var aperture by mutableIntStateOf(8)
     var brightness by mutableIntStateOf(7)
     var contrast by mutableIntStateOf(7)
-    var saturation by mutableIntStateOf(7)
+    var saturation by mutableIntStateOf(4)
     var wbMode by mutableIntStateOf(0)
     var rGain by mutableIntStateOf(32)
     var bGain by mutableIntStateOf(32)
@@ -120,6 +138,21 @@ class ControllerState(private val context: Context) {
             "192.168.5"
         }
         pushLog("FoMaKo Android controller ready (VISCA 52381 / 5678)")
+        scope.launch(Dispatchers.IO) {
+            for (command in viscaQueue) {
+                val result = executeVisca(command)
+                withContext(Dispatchers.Main) {
+                    result.fold(
+                        onSuccess = { msg ->
+                            setStatusMsg("${command.camera.name} ${command.what} OK: $msg")
+                        },
+                        onFailure = { error ->
+                            setStatusMsg("${command.camera.name} ${command.what} FAILED: ${error.message ?: "send failed"}")
+                        },
+                    )
+                }
+            }
+        }
     }
 
     fun current(): CameraConfig {
@@ -215,34 +248,44 @@ class ControllerState(private val context: Context) {
 
     fun sendVisca(what: String, op: String, a: Int = 0, b: Int = 0, c: Int = 0) {
         val cam = current()
-        val pkt = RustBridge.nativeBuildVisca(op, cam.address, a, b, c)
-        val hex = pkt.joinToString(" ") { "%02X".format(it) }
-        val relay = relayUrl.trim().trimEnd('/')
-        if (useRelay && relay.isNotEmpty()) {
-            setStatusMsg("${cam.name} -> $what (${cam.ip} via relay): $hex")
-            scope.launch(Dispatchers.IO) {
-                val res = postRelayVisca(relay, cam, pkt)
-                withContext(Dispatchers.Main) {
-                    if (res != null) pushLog(res)
-                }
-            }
+        val pkt = try {
+            RustBridge.nativeBuildVisca(op, cam.address, a, b, c)
+        } catch (error: Throwable) {
+            setStatusMsg("${cam.name} $what FAILED: ${error.message ?: "VISCA builder unavailable"}")
             return
         }
-        setStatusMsg("${cam.name} -> $what (${cam.ip}): $hex")
-        scope.launch(Dispatchers.IO) {
+        if (pkt.isEmpty()) {
+            setStatusMsg("${cam.name} $what FAILED: unsupported VISCA command '$op'")
+            return
+        }
+        val hex = pkt.joinToString(" ") { "%02X".format(it) }
+        val relay = relayUrl.trim().trimEnd('/').takeIf { useRelay && it.isNotEmpty() }
+        val via = relay?.let { " via relay" }.orEmpty()
+        setStatusMsg("${cam.name} -> $what (${cam.ip}$via): $hex")
+        val queued = viscaQueue.trySend(ViscaCommand(cam, what, pkt, relay))
+        if (!queued.isSuccess) {
+            setStatusMsg("${cam.name} $what FAILED: command queue unavailable")
+        }
+    }
+
+    private fun executeVisca(command: ViscaCommand): Result<String> {
+        val relay = command.relay
+        if (relay != null) {
+            val error = postRelayVisca(relay, command.camera, command.payload)
+            return if (error == null) Result.success("sent via relay") else Result.failure(IllegalStateException(error))
+        }
+        return runCatching {
             val raw = RustBridge.nativeSendVisca(
-                cam.ip,
-                cam.protocol.defaultPort,
-                cam.protocol == ProtoMode.Tcp,
-                pkt
+                command.camera.ip,
+                command.camera.protocol.defaultPort,
+                command.camera.protocol == ProtoMode.Tcp,
+                command.payload,
             )
-            val reply = runCatching { JSONObject(raw) }.getOrNull()
-            withContext(Dispatchers.Main) {
-                if (reply != null && !reply.optBoolean("ok", false)) {
-                    val err = reply.optString("error", "send failed")
-                    setStatusMsg("${cam.name} $what FAILED: $err")
-                }
+            val reply = JSONObject(raw)
+            if (!reply.optBoolean("ok", false)) {
+                error(reply.optString("error", "send failed"))
             }
+            reply.optString("msg", "sent")
         }
     }
 
@@ -319,18 +362,15 @@ class ControllerState(private val context: Context) {
     }
 
     fun applyPictureEdit() {
-        val b = (7.0f + picBright * 0.07f).let { kotlin.math.round(it).toInt().coerceIn(0, 14) }
-        val c = (7.0f + picContrast * 0.07f).let { kotlin.math.round(it).toInt().coerceIn(0, 14) }
-        val s = (7.0f + picSat * 0.07f).let { kotlin.math.round(it).toInt().coerceIn(0, 14) }
-        val ap = (8.0f + picSharp * 0.07f).let { kotlin.math.round(it).toInt().coerceIn(0, 15) }
-        brightness = b
-        contrast = c
-        saturation = s
-        aperture = ap
-        sendVisca("Picture Brightness $b", "brightness", b)
-        sendVisca("Picture Contrast $c", "contrast", c)
-        sendVisca("Picture Saturation $s", "saturation", s)
-        sendVisca("Picture Sharpness $ap", "aperture", ap)
+        val values = pictureEditValues(picBright, picContrast, picSat, picSharp)
+        brightness = values.brightness
+        contrast = values.contrast
+        saturation = values.saturation
+        aperture = values.sharpness
+        sendVisca("Picture Brightness ${values.brightness}", "brightness", values.brightness)
+        sendVisca("Picture Contrast ${values.contrast}", "contrast", values.contrast)
+        sendVisca("Picture Saturation ${values.saturation}", "saturation", values.saturation)
+        sendVisca("Picture Sharpness ${values.sharpness}", "aperture", values.sharpness)
     }
 
     private fun parseScanArray(json: String): List<ScanHit> {

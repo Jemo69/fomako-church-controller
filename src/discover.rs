@@ -399,10 +399,16 @@ pub fn relay_post_visca(
     }
     let text = String::from_utf8_lossy(&data).to_string();
     let body = text.split("\r\n\r\n").last().unwrap_or("").to_string();
-    if body.contains("\"ok\"") {
-        Ok(body)
+    let reply: serde_json::Value = serde_json::from_str(&body)
+        .map_err(|_| format!("relay: bad reply: {}", body.chars().take(160).collect::<String>()))?;
+    if reply.get("ok").and_then(serde_json::Value::as_bool) == Some(true) {
+        Ok(reply.get("msg").and_then(serde_json::Value::as_str).unwrap_or("sent").to_string())
     } else {
-        Err(format!("relay: {}", body.chars().take(160).collect::<String>()))
+        Err(reply
+            .get("error")
+            .and_then(serde_json::Value::as_str)
+            .unwrap_or("relay rejected command")
+            .to_string())
     }
 }
 
@@ -484,6 +490,7 @@ pub fn parse_scan_json(body: &str) -> Result<Vec<FoundCamera>, String> {
 #[cfg(target_arch = "wasm32")]
 mod wasm_net {
     use super::FoundCamera;
+    use serde_json::Value;
     use wasm_bindgen::prelude::*;
     use web_sys::{Request, RequestInit, RequestMode, Response};
 
@@ -498,12 +505,17 @@ mod wasm_net {
             .await
             .map_err(|_| "fetch failed (is the relay serving this page?)".to_string())?
             .into();
+        let status = resp.status();
         let text = wasm_bindgen_futures::JsFuture::from(
             resp.text().map_err(|_| "no body".to_string())?,
         )
         .await
         .map_err(|_| "read failed".to_string())?;
-        Ok(js_sys::JsString::from(text).into())
+        let text = js_sys::JsString::from(text).into();
+        if !(200..300).contains(&status) {
+            return Err(format!("relay HTTP {status}: {text}"));
+        }
+        Ok(text)
     }
 
     pub async fn post_visca(
@@ -516,13 +528,33 @@ mod wasm_net {
         let opts = RequestInit::new();
         opts.set_method("POST");
         opts.set_mode(RequestMode::SameOrigin);
+        let headers = web_sys::Headers::new().map_err(|_| "headers failed".to_string())?;
+        headers
+            .set("Content-Type", "application/json")
+            .map_err(|_| "header failed".to_string())?;
+        opts.set_headers_headers(&headers);
         let body = format!(
             "{{\"ip\":\"{}\",\"port\":{},\"proto\":\"{}\",\"payload\":\"{}\"}}",
             ip, port, proto, payload_hex
         );
         opts.set_body(&JsValue::from_str(&body));
         let url = format!("{}/visca", super::relay_base(relay_url));
-        fetch_text(&url, Some(opts)).await
+        let text = fetch_text(&url, Some(opts)).await?;
+        let reply: Value = serde_json::from_str(&text)
+            .map_err(|_| "relay returned an invalid reply".to_string())?;
+        if reply.get("ok").and_then(Value::as_bool) == Some(true) {
+            Ok(reply
+                .get("msg")
+                .and_then(Value::as_str)
+                .unwrap_or("sent")
+                .to_string())
+        } else {
+            Err(reply
+                .get("error")
+                .and_then(Value::as_str)
+                .unwrap_or("relay rejected command")
+                .to_string())
+        }
     }
 
     pub async fn get_scan(relay_url: &str, prefix: &str) -> Result<Vec<FoundCamera>, String> {
@@ -705,18 +737,18 @@ mod tests {
     fn rtsp_urls() {
         assert_eq!(
             crate::preview::rtsp_url("192.168.5.163", 554, "", ""),
-            "rtsp://192.168.5.163:554/live/av0"
+            "rtsp://192.168.5.163:554/1"
         );
         assert_eq!(
             crate::preview::rtsp_url("192.168.5.163", 554, "admin", "admin"),
-            "rtsp://admin:admin@192.168.5.163:554/live/av0"
+            "rtsp://admin:admin@192.168.5.163:554/1"
         );
         // '@ : / ? #' must never break the URL structure.
         assert_eq!(
             crate::preview::rtsp_url("10.0.0.2", 8554, "ad@min", "p:a/s?s#"),
-            "rtsp://ad%40min:p%3Aa%2Fs%3Fs%23@10.0.0.2:8554/live/av0"
+            "rtsp://ad%40min:p%3Aa%2Fs%3Fs%23@10.0.0.2:8554/1"
         );
-        assert_eq!(crate::preview::rtsp_url("10.0.0.2", 554, "admin", ""), "rtsp://admin:@10.0.0.2:554/live/av0");
+        assert_eq!(crate::preview::rtsp_url("10.0.0.2", 554, "admin", ""), "rtsp://admin:@10.0.0.2:554/1");
     }
     #[test]
     fn old_configs_without_login_still_load() {

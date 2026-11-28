@@ -11,7 +11,7 @@ use jni::sys::{jboolean, jint};
 use serde::Serialize;
 
 use crate::discover::{self, ScanEvent, ScanHandle};
-use crate::visca::{self, Protocol, PtDir};
+use crate::visca::{self, Protocol};
 
 #[derive(Serialize)]
 struct SendReply {
@@ -30,66 +30,8 @@ struct ScanItem {
     onvif: bool,
 }
 
-fn dir_from_code(code: i32) -> PtDir {
-    match code {
-        0 => PtDir::Up,
-        1 => PtDir::Down,
-        2 => PtDir::Left,
-        3 => PtDir::Right,
-        4 => PtDir::UpLeft,
-        5 => PtDir::UpRight,
-        6 => PtDir::DownLeft,
-        7 => PtDir::DownRight,
-        8 => PtDir::Home,
-        _ => PtDir::Stop,
-    }
-}
-
 fn build_visca_packet(op: &str, addr: u8, a: i32, b: i32, c: i32) -> Vec<u8> {
-    let a_u8 = a.clamp(0, 255) as u8;
-    let b_u8 = b.clamp(0, 255) as u8;
-    match op {
-        "power" => visca::power(addr, a != 0),
-        "pt_drive" => visca::pan_tilt_drive(addr, a_u8, b_u8, dir_from_code(c)),
-        "zoom_tele" => visca::zoom_tele_var(addr, a_u8),
-        "zoom_wide" => visca::zoom_wide_var(addr, a_u8),
-        "zoom_stop" => visca::zoom_stop(addr),
-        "focus_far" => visca::focus_far(addr),
-        "focus_near" => visca::focus_near(addr),
-        "focus_stop" => visca::focus_stop(addr),
-        "focus_auto" => visca::focus_auto(addr),
-        "focus_manual" => visca::focus_manual(addr),
-        "focus_one_push" => visca::focus_one_push(addr),
-        "preset_recall" => visca::preset_recall(addr, a_u8),
-        "preset_set" => visca::preset_set(addr, a_u8),
-        "preset_clear" => visca::preset_clear(addr, a_u8),
-        "ae_mode" => visca::ae_mode(addr, a_u8),
-        "shutter" => visca::shutter_direct(addr, a_u8),
-        "iris" => visca::iris_direct(addr, a_u8),
-        "gain_limit" => visca::gain_limit(addr, a_u8),
-        "bright" => visca::bright_direct(addr, a_u8),
-        "expcomp_onoff" => visca::expcomp_onoff(addr, a != 0),
-        "expcomp" => visca::expcomp_direct(addr, a_u8),
-        "backlight" => visca::backlight(addr, a != 0),
-        "wdr" => visca::wdr(addr, a_u8),
-        "nr2d" => visca::nr2d(addr, a_u8),
-        "nr3d" => visca::nr3d(addr, a_u8),
-        "flicker" => visca::flicker(addr, a_u8),
-        "gamma" => visca::gamma(addr, a_u8),
-        "lowlight" => visca::lowlight(addr, a != 0),
-        "aperture" => visca::aperture(addr, a_u8),
-        "brightness" => visca::brightness_direct(addr, a_u8),
-        "contrast" => visca::contrast_direct(addr, a_u8),
-        "saturation" => visca::saturation(addr, a_u8),
-        "wb_mode" => visca::wb_mode(addr, a_u8),
-        "wb_one_push" => visca::wb_one_push_trigger(addr),
-        "awb_sens" => visca::awb_sensitivity(addr, a_u8),
-        "rgain" => visca::rgain(addr, a_u8),
-        "bgain" => visca::bgain(addr, a_u8),
-        "flip" => visca::flip(addr, a_u8),
-        "bw" => visca::picture_bw(addr, a != 0),
-        _ => Vec::new(),
-    }
+    visca::named_command(op, addr, a, b, c).unwrap_or_default()
 }
 
 #[unsafe(no_mangle)]

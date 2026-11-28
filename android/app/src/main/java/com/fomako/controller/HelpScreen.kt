@@ -26,7 +26,7 @@ fun HelpScreen() {
     )
     HelpCard(
         "1. Live preview",
-        "Control and Picture Edit connect directly to rtsp://camera:554/live/av0. If the camera asks for a login, set User & Password on the Cameras tab (FoMaKo default: admin / admin)."
+        "Control and Picture Edit fetch JPEG previews directly from http://camera/action_snapshot. If the camera asks for a login, set User & Password on the Cameras tab (FoMaKo default: admin / admin)."
     )
     HelpCard(
         "2. Lock the camera IP",

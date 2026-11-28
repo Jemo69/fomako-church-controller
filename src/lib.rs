@@ -22,6 +22,9 @@ pub mod preview;
 pub mod view;
 #[path = "visca.rs"]
 pub mod visca;
+#[cfg(not(target_os = "android"))]
+#[path = "update.rs"]
+pub mod update;
 
 #[cfg(target_arch = "wasm32")]
 use model::App;
@@ -81,7 +84,7 @@ fn init_from_url() -> App {
                 // Booth QR can pre-configure everything, e.g.
                 // #relay=http%3A%2F%2Fpc%3A8080&cam=192.168.5.163&user=admin&pass=secret&subnet=192.168.5&autostart=scan
                 let v = url_decode(v);
-                if crate::discover::prefix_of(&format!("{}.1", v)).is_some()
+                if v.parse::<std::net::Ipv4Addr>().is_ok()
                     && !s.cameras.iter().any(|c| c.ip == v)
                 {
                     pending_cam = Some(v);
@@ -137,7 +140,9 @@ pub fn start() {
 #[cfg(target_arch = "wasm32")]
 fn setup(s: &mut App, waker: rune::Waker) {
     s.preview_cache = Some(rune::ImageCache::new(waker.clone()));
-    s.preview_waker = Some(waker);
+    s.preview_waker = Some(waker.clone());
+    s.action_waker = Some(waker.clone());
+    s.update_waker = Some(waker);
 }
 
 #[cfg(target_arch = "wasm32")]
@@ -148,6 +153,8 @@ fn poll(s: &mut App, clock: f64, tx: &mut rune::Tx) -> bool {
         actions::start_scan(s, tx);
     }
     let mut changed = s.scan_poll(tx);
+    changed |= actions::poll_action_replies(s);
     changed |= preview::poll(s, clock, tx);
+    changed |= update::poll(s, clock, tx);
     changed
 }

@@ -5,6 +5,8 @@ use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 
 use crate::discover::{self, ScanEvent, ScanHandle};
 use crate::model::{App, ScanState};
+#[cfg(target_arch = "wasm32")]
+use crate::model::ActionReply;
 use crate::visca::{self, PtDir};
 
 fn hex_str(bytes: &[u8]) -> String {
@@ -38,8 +40,20 @@ fn send(app: &mut App, what: &str, payload: Vec<u8>) {
         #[cfg(target_arch = "wasm32")]
         {
             let hex_payload = hex_str(&payload);
+            let slot = app.action_slot.clone();
+            let wake = app.action_waker.clone();
+            let reply_what = what.clone();
             wasm_bindgen_futures::spawn_local(async move {
-                let _ = discover::relay_post_visca_async(&relay, &ip, port, proto, &hex_payload).await;
+                let result = discover::relay_post_visca_async(&relay, &ip, port, proto, &hex_payload).await;
+                if let Ok(mut s) = slot.lock() {
+                    *s = Some(ActionReply {
+                        what: reply_what,
+                        result,
+                    });
+                }
+                if let Some(w) = wake {
+                    w();
+                }
             });
         }
         app.set_status(status);
@@ -318,15 +332,19 @@ pub fn start_scan(app: &mut App, tx: &mut rune::Tx) {
     tx.wake_after(std::time::Duration::from_millis(100));
 }
 
+/// Map photo-style -100..+100 controls to the camera's documented ranges.
+/// Saturation 4 is 100%; 7 would incorrectly apply 130% at the neutral position.
+pub fn picture_edit_targets(bright: i32, contrast: i32, sat: i32, sharp: i32) -> (u8, u8, u8, u8) {
+    let b = ((7.0 + bright as f32 * 0.07).round() as i32).clamp(0, 14) as u8;
+    let c = ((7.0 + contrast as f32 * 0.07).round() as i32).clamp(0, 14) as u8;
+    let s = ((4.0 + sat as f32 * 0.10).round() as i32).clamp(0, 14) as u8;
+    let ap = ((8.0 + sharp as f32 * 0.07).round() as i32).clamp(0, 15) as u8;
+    (b, c, s, ap)
+}
+
 /// Apply picture-edit sliders to the real camera image pipeline.
-/// Maps -100..+100 preview sliders onto camera ranges, then sends.
 pub fn apply_picture_edit(app: &mut App) {
-    // Map preview -100..100 to camera ranges:
-    // brightness 0..14 (center 7), contrast 0..14, saturation 0..14, aperture 0..15
-    let b = ((7.0 + app.pic_bright as f32 * 0.07).round() as i32).clamp(0, 14) as u8;
-    let c = ((7.0 + app.pic_contrast as f32 * 0.07).round() as i32).clamp(0, 14) as u8;
-    let s = ((7.0 + app.pic_sat as f32 * 0.07).round() as i32).clamp(0, 14) as u8;
-    let ap = ((8.0 + app.pic_sharp as f32 * 0.07).round() as i32).clamp(0, 15) as u8;
+    let (b, c, s, ap) = picture_edit_targets(app.pic_bright, app.pic_contrast, app.pic_sat, app.pic_sharp);
     app.brightness = b;
     app.contrast = c;
     app.saturation = s;
@@ -336,4 +354,37 @@ pub fn apply_picture_edit(app: &mut App) {
     send(app, &format!("Picture Contrast {}", c), visca::contrast_direct(a, c));
     send(app, &format!("Picture Saturation {}", s), visca::saturation(a, s));
     send(app, &format!("Picture Sharpness {}", ap), visca::aperture(a, ap));
+}
+
+#[cfg(target_arch = "wasm32")]
+pub fn poll_action_replies(app: &mut App) -> bool {
+    let reply = app
+        .action_slot
+        .lock()
+        .map(|mut slot| slot.take())
+        .unwrap_or(None);
+    let Some(reply) = reply else {
+        return false;
+    };
+    match reply.result {
+        Ok(msg) => app.set_status(format!("{}: {}", reply.what, msg)),
+        Err(error) => app.set_status(format!("{} FAILED: {}", reply.what, error)),
+    }
+    true
+}
+
+#[cfg(test)]
+mod tests {
+    use super::picture_edit_targets;
+
+    #[test]
+    fn neutral_picture_edit_is_actually_neutral() {
+        assert_eq!(picture_edit_targets(0, 0, 0, 0), (7, 7, 4, 8));
+    }
+
+    #[test]
+    fn picture_edit_clamps_to_camera_ranges() {
+        assert_eq!(picture_edit_targets(-100, -100, -100, -100), (0, 0, 0, 1));
+        assert_eq!(picture_edit_targets(100, 100, 100, 100), (14, 14, 14, 15));
+    }
 }
