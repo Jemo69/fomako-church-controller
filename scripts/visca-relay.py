@@ -13,6 +13,8 @@ then Scan network or drive cameras.
 
 Endpoints (same origin, so no CORS headaches):
   POST /visca     {"ip","port","proto":"sony_udp"|"tcp","payload":"hex"}
+  GET  /api/stream?ip=&user=&pass=   live multipart JPEG (ffmpeg → 30 fps)
+  GET  /api/snapshot?ip=&user=&pass= one JPEG (fallback)
   GET  /api/scan?subnet=192.168.1   (TCP 5678 + :80 title + UDP 52381 + ONVIF)
 Everything else serves static files from --serve-web (or index text).
 """
@@ -47,7 +49,7 @@ class Handler(BaseHTTPRequestHandler):
         import re
 
         msg = fmt % a
-        # Never log passwords (they arrive in /api/snapshot and /visca query/body).
+        # Never log passwords (they arrive in /api/stream, /api/snapshot and /visca query/body).
         msg = re.sub(r'"pass(word)?"\s*:\s*"[^"]*"', '"pass":"***"', msg)
         msg = re.sub(r"pass=[^&\s]*", "pass=***", msg)
         sys.stderr.write("[%s] %s\n" % (time.strftime("%H:%M:%S"), msg))
@@ -94,6 +96,39 @@ class Handler(BaseHTTPRequestHandler):
             self.send_header("Cache-Control", "no-store")
             self.end_headers()
             self.wfile.write(jpg)
+            return
+        if url.path == "/api/stream":
+            q = urllib.parse.parse_qs(url.query)
+            ip = (q.get("ip", [""])[0] or "").strip()
+            user = (q.get("user", [""])[0] or "").strip()
+            pw = (q.get("pass", [""])[0] or "").strip()
+            parts = ip.split(".")
+            if len(parts) != 4 or not all(p.isdigit() and 0 <= int(p) <= 255 for p in parts):
+                return self._json({"error": "ip like 192.168.5.163"}, 400)
+            try:
+                port = int((q.get("port", ["554"])[0] or "554"))
+            except ValueError:
+                port = 554
+            self.send_response(200)
+            self.send_header("Content-Type", "multipart/x-mixed-replace; boundary=fomako")
+            self.send_header("Cache-Control", "no-store")
+            self.send_header("Connection", "close")
+            self.end_headers()
+            frames = stream_jpegs(ip, port, user, pw)
+            try:
+                for jpg in frames:
+                    self.wfile.write(
+                        b"\r\n--fomako\r\nContent-Type: image/jpeg\r\nContent-Length: "
+                        + str(len(jpg)).encode()
+                        + b"\r\n\r\n"
+                    )
+                    self.wfile.write(jpg)
+                    self.wfile.write(b"\r\n")
+                    self.wfile.flush()
+            except (BrokenPipeError, ConnectionResetError):
+                pass
+            finally:
+                frames.close()
             return
         # static files for the phone web UI
         web = self.server.web_dir
@@ -215,7 +250,7 @@ def grab_snapshot(ip: str, port: int = 554, user: str = "", pw: str = "", timeou
     if shutil.which("ffmpeg") is None:
         return None, f"{http_error}; ffmpeg not found on the relay PC"
     rtsp_error = "RTSP unavailable"
-    for path in ("1", "live/av0"):
+    for path in ("2", "live/av1", "1", "live/av0"):
         try:
             p = subprocess.run(
                 ["ffmpeg", "-hide_banner", "-loglevel", "error",
@@ -244,6 +279,90 @@ def grab_snapshot(ip: str, port: int = 554, user: str = "", pw: str = "", timeou
         else:
             rtsp_error = "ffmpeg could not decode RTSP — check camera stream/codec"
     return None, f"{http_error}; {rtsp_error}"
+
+
+def _jpeg_frames(stream, chunk_size: int = 65536):
+    """Split a byte stream into JPEGs (SOI..EOI), ignoring any multipart headers."""
+    buf = b""
+    while True:
+        chunk = stream.read(chunk_size)
+        if not chunk:
+            return
+        buf += chunk
+        while True:
+            start = buf.find(b"\xff\xd8\xff")
+            if start < 0:
+                buf = buf[-2:]
+                break
+            if start:
+                buf = buf[start:]
+            end = buf.find(b"\xff\xd9", 2)
+            if end < 0:
+                if len(buf) > 16 * 1024 * 1024:
+                    buf = b""
+                break
+            yield buf[: end + 2]
+            buf = buf[end + 2 :]
+
+
+def _rtsp_jpegs(ip: str, port: int, user: str, pw: str):
+    """One ffmpeg per RTSP path; stops after the first path that produced frames."""
+    import shutil
+    import subprocess
+
+    if shutil.which("ffmpeg") is None:
+        return
+    for path in ("2", "live/av1", "1", "live/av0"):
+        cmd = [
+            "ffmpeg", "-hide_banner", "-loglevel", "error", "-nostdin",
+            "-rtsp_transport", "tcp", "-timeout", "5000000",
+            "-i", f"rtsp://{_userinfo(user, pw)}{ip}:{port}/{path}",
+            "-an", "-sn", "-dn", "-vf", "fps=30,scale=480:-2",
+            "-f", "mjpeg", "-q:v", "5", "-",
+        ]
+        try:
+            proc = subprocess.Popen(cmd, stdout=subprocess.PIPE, stderr=subprocess.DEVNULL, bufsize=0)
+        except OSError:
+            return
+        saw = False
+        try:
+            for jpg in _jpeg_frames(proc.stdout):
+                saw = True
+                yield jpg
+        finally:
+            proc.kill()
+            proc.wait()
+        if saw:
+            return
+
+
+def _snapshot_jpegs(ip: str, user: str, pw: str) -> bool:
+    """Poll HTTP stills flat out; returns True if any frame was served."""
+    failures = 0
+    saw = False
+    while failures < 3:
+        jpg, _ = grab_http_snapshot(ip, user, pw, timeout=4)
+        if jpg is None:
+            failures += 1
+            time.sleep(0.8)
+            continue
+        failures = 0
+        saw = True
+        yield jpg
+    return saw
+
+
+def stream_jpegs(ip: str, port: int = 554, user: str = "", pw: str = ""):
+    """Endless JPEG frames: RTSP at the camera's rate, HTTP stills otherwise."""
+    while True:
+        saw = False
+        for jpg in _rtsp_jpegs(ip, port, user, pw):
+            saw = True
+            yield jpg
+        if not saw:
+            # RTSP unavailable (or ffmpeg missing): stills as fast as they come.
+            saw = yield from _snapshot_jpegs(ip, user, pw)
+        time.sleep(0.25 if saw else 3.0)
 
 
 def valid_prefix(p: str) -> bool:
