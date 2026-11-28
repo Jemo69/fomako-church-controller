@@ -24,6 +24,10 @@ fn relay_proto(app: &App) -> (&'static str, u16) {
 }
 
 fn send(app: &mut App, what: &str, payload: Vec<u8>) {
+    if app.follow_on && app.selected == app.follow_follower {
+        app.set_status("Follower is driven by cross-camera follow — stop following first.".into());
+        return;
+    }
     let cam = app.current().clone();
     let hex = visca::hex(&payload);
     if app.use_relay && !app.relay_url.text.trim().is_empty() {
@@ -154,12 +158,20 @@ pub fn apply_tracking(app: &mut App) {
 }
 
 pub fn toggle_tracking(app: &mut App) {
+    if app.follow_on && app.selected == app.follow_follower {
+        app.set_status("Stop cross-camera follow before changing the follower's tracking.".into());
+        return;
+    }
     app.track_on = !app.track_on;
     apply_tracking(app);
 }
 
 /// Switch mode and turn tracking on (mode only applies while tracking runs).
 pub fn set_tracking_mode(app: &mut App, area: bool) {
+    if app.follow_on && app.selected == app.follow_follower {
+        app.set_status("Stop cross-camera follow before changing the follower's tracking.".into());
+        return;
+    }
     app.track_area = area;
     app.track_on = true;
     apply_tracking(app);

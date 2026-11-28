@@ -268,20 +268,16 @@ pub fn start(
     std::thread::spawn(move || {
         // A follower left in camera-side tracking ignores pan/tilt.
         let (follower_protocol, follower_port) = proto(&spec.follower);
+        let mut tracking_off_error = None;
         if let Err(error) = visca::send_only(
             &spec.follower.ip,
             follower_port,
             follower_protocol,
             &visca::tracking(spec.follower.address, false, false),
         ) {
-            emit(
-                &slot,
-                &wake,
-                FollowEvent::Error {
-                    gen,
-                    msg: format!("{} tracking off: {}", spec.follower.name, error),
-                },
-            );
+            let msg = format!("{} tracking off: {}", spec.follower.name, error);
+            tracking_off_error = Some(msg.clone());
+            emit(&slot, &wake, FollowEvent::Error { gen, msg });
         }
         let mut last_sent: Option<(u16, u16)> = None;
         let mut last_sent_at: Option<std::time::Instant> = None;
@@ -331,6 +327,7 @@ pub fn start(
                                 last_sent = Some(target);
                                 last_sent_at = Some(std::time::Instant::now());
                                 last_follower_error.clear();
+                                tracking_off_error = None;
                             }
                             Err(error) => {
                                 let note = format!("{}: {}", spec.follower.name, error);
@@ -349,6 +346,10 @@ pub fn start(
                         break;
                     }
                     if tick_error {
+                        sleep_while(gen, &current, TICK);
+                        continue;
+                    }
+                    if tracking_off_error.is_some() {
                         sleep_while(gen, &current, TICK);
                         continue;
                     }
