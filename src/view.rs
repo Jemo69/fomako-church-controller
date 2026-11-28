@@ -965,17 +965,20 @@ fn camera_list(s: &App, t: rune::tok::Theme, touch: bool) -> El {
                     let leader_ip = s.cameras.get(s.follow_leader).map(|c| c.ip.clone());
                     let follower_ip = s.cameras.get(s.follow_follower).map(|c| c.ip.clone());
                     actions::follow_stop(s);
-                    s.follow_ready = false;
                     s.cameras.remove(s.selected);
                     s.select_camera(0);
-                    s.selected = 0;
                     let last = s.cameras.len() - 1;
-                    s.follow_leader = leader_ip
-                        .and_then(|ip| s.cameras.iter().position(|c| c.ip == ip))
-                        .unwrap_or(0)
-                        .min(last);
-                    s.follow_follower = follower_ip
-                        .and_then(|ip| s.cameras.iter().position(|c| c.ip == ip))
+                    let leader_found = leader_ip
+                        .as_ref()
+                        .and_then(|ip| s.cameras.iter().position(|c| &c.ip == ip));
+                    let follower_found = follower_ip
+                        .as_ref()
+                        .and_then(|ip| s.cameras.iter().position(|c| &c.ip == ip));
+                    if leader_found.is_none() || follower_found.is_none() {
+                        s.follow_ready = false;
+                    }
+                    s.follow_leader = leader_found.unwrap_or(0).min(last);
+                    s.follow_follower = follower_found
                         .unwrap_or(if last > 0 { 1 } else { 0 })
                         .min(last);
                     if s.follow_leader == s.follow_follower {

@@ -7,4 +7,4 @@ android/local.properties
 android/build/
 android/app/build/
 android/app/src/main/jniLibs/
-fomako-follow.json
+fomako-follow.json*
