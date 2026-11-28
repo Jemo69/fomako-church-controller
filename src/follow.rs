@@ -70,7 +70,16 @@ fn load_from(path: &std::path::Path) -> Option<FollowSaved> {
 }
 
 pub fn load_saved() -> Option<FollowSaved> {
-    paths().iter().find_map(|path| load_from(path))
+    // Prefer the newest copy, so a stale working-directory file cannot
+    // shadow an offset written beside the app.
+    paths()
+        .into_iter()
+        .filter_map(|path| {
+            let modified = std::fs::metadata(&path).and_then(|m| m.modified()).ok()?;
+            load_from(&path).map(|saved| (modified, saved))
+        })
+        .max_by_key(|(modified, _)| *modified)
+        .map(|(_, saved)| saved)
 }
 
 fn write_one(path: &std::path::Path, text: &str) -> Result<(), String> {
@@ -82,7 +91,11 @@ fn write_one(path: &std::path::Path, text: &str) -> Result<(), String> {
     // Very defensive fallback; the first rename is atomic and replaces on
     // both Unix and Windows.
     let _ = std::fs::remove_file(path);
-    std::fs::rename(&tmp, path).map_err(|e| format!("{}: {e}", path.display()))
+    let result = std::fs::rename(&tmp, path).map_err(|e| format!("{}: {e}", path.display()));
+    if result.is_err() {
+        let _ = std::fs::remove_file(&tmp);
+    }
+    result
 }
 
 /// Write every portable copy. A read-only location does not discard a writable one.
@@ -101,7 +114,10 @@ pub fn save(saved: &FollowSaved) -> Result<(), String> {
         }
     }
     if wrote {
-        Ok(())
+        match first_error {
+            Some(error) => Err(format!("saved one copy but not all: {}", error)),
+            None => Ok(()),
+        }
     } else {
         Err(first_error.unwrap_or_else(|| "no writable config location".to_string()))
     }

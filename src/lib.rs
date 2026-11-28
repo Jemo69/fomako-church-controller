@@ -14,6 +14,7 @@ pub mod discover;
 #[cfg(not(target_os = "android"))]
 #[path = "follow.rs"]
 pub mod follow;
+#[cfg(not(target_os = "android"))]
 #[path = "look.rs"]
 pub mod look;
 #[cfg(not(target_os = "android"))]

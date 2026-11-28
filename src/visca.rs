@@ -408,8 +408,12 @@ fn send_sony_udp(ip: &str, port: u16, payload: &[u8]) -> Result<String, String> 
             } else {
                 &buf[..n]
             };
-            if reply.len() >= 3 && reply[0] == 0x90 && reply[1] == 0x41 {
-                return Err(format!("camera rejected command ({})", hex(reply)));
+            if reply.len() >= 2
+                && reply[0] >= 0x90
+                && reply[0] & 0x0F == 0
+                && reply[1] & 0xF0 == 0x60
+            {
+                return Err(format!("camera error ({})", hex(reply)));
             }
             Ok(format!("sent {}B seq={} ack {}B", packet.len(), seq, n))
         }
@@ -728,7 +732,7 @@ mod tests {
     }
 
     #[test]
-    fn camera_error_ack_is_not_reported_as_success() {
+    fn ack_is_success_and_error_reply_is_not() {
         let camera = UdpSocket::bind("127.0.0.1:0").expect("bind fake camera");
         let port = camera.local_addr().unwrap().port();
         std::thread::spawn(move || {
@@ -738,8 +742,19 @@ mod tests {
                 .send_to(&[0x01, 0x00, 0x00, 0x03, 0, 0, 0, 1, 0x90, 0x41, 0xFF], source)
                 .unwrap();
         });
-        let result = send_blocking("127.0.0.1", port, Protocol::SonyUdp, &power(1, true));
-        assert!(result.unwrap_err().contains("camera rejected command"));
+        assert!(send_blocking("127.0.0.1", port, Protocol::SonyUdp, &power(1, true)).is_ok());
+
+        let camera = UdpSocket::bind("127.0.0.1:0").expect("bind fake camera");
+        let port = camera.local_addr().unwrap().port();
+        std::thread::spawn(move || {
+            let mut packet = [0u8; 128];
+            let (_, source) = camera.recv_from(&mut packet).expect("receive command");
+            camera
+                .send_to(&[0x01, 0x00, 0x00, 0x03, 0, 0, 0, 1, 0x90, 0x60, 0x02, 0xFF], source)
+                .unwrap();
+        });
+        let error = send_blocking("127.0.0.1", port, Protocol::SonyUdp, &power(1, true)).unwrap_err();
+        assert!(error.contains("camera error"), "{error}");
     }
 
     #[test]
