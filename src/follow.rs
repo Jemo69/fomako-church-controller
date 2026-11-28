@@ -24,7 +24,7 @@ use crate::model::CameraConfig;
 #[cfg(not(target_arch = "wasm32"))]
 use crate::visca::{self, Protocol};
 
-/// Shortest signed delta never exceeds half the circle.
+/// Largest magnitude accepted for a stored or nudged offset.
 pub const OFFSET_MAX: i32 = 0x7FFF;
 /// ~0.1° at the documented ~0.5° per 100 counts; the camera's own aim accuracy.
 pub const DEADBAND: i32 = 20;
@@ -225,7 +225,11 @@ pub fn calibrate(leader: &CameraConfig, follower: &CameraConfig) -> Result<(i32,
     {
         return Err("a camera moved during calibration — hold both still and retry".to_string());
     }
-    Ok(offset_from(first, follower_pos))
+    let (pan, tilt) = offset_from(first, follower_pos);
+    Ok((
+        pan.clamp(-OFFSET_MAX, OFFSET_MAX),
+        tilt.clamp(-OFFSET_MAX, OFFSET_MAX),
+    ))
 }
 
 /// Map a leader position through the calibrated offset. The result wraps on
@@ -269,6 +273,7 @@ pub fn start(
         // A follower left in camera-side tracking ignores pan/tilt.
         let (follower_protocol, follower_port) = proto(&spec.follower);
         let mut tracking_off_error = None;
+        let mut last_tracking_off = std::time::Instant::now();
         if let Err(error) = visca::send_only(
             &spec.follower.ip,
             follower_port,
@@ -285,6 +290,25 @@ pub fn start(
         let mut last_leader_error = String::new();
         let mut last_follower_error = String::new();
         while current.load(Ordering::SeqCst) == gen {
+            if tracking_off_error.is_some() && last_tracking_off.elapsed() >= RESEND {
+                last_tracking_off = std::time::Instant::now();
+                let (protocol, port) = proto(&spec.follower);
+                match visca::send_only(
+                    &spec.follower.ip,
+                    port,
+                    protocol,
+                    &visca::tracking(spec.follower.address, false, false),
+                ) {
+                    Ok(()) => tracking_off_error = None,
+                    Err(error) => {
+                        let msg = format!("{} tracking off: {}", spec.follower.name, error);
+                        if tracking_off_error.as_ref() != Some(&msg) {
+                            tracking_off_error = Some(msg.clone());
+                            emit(&slot, &wake, FollowEvent::Error { gen, msg });
+                        }
+                    }
+                }
+            }
             match query_pos(&spec.leader) {
                 Ok((lp, lt)) => {
                     if current.load(Ordering::SeqCst) != gen {
@@ -327,7 +351,6 @@ pub fn start(
                                 last_sent = Some(target);
                                 last_sent_at = Some(std::time::Instant::now());
                                 last_follower_error.clear();
-                                tracking_off_error = None;
                             }
                             Err(error) => {
                                 let note = format!("{}: {}", spec.follower.name, error);

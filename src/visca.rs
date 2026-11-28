@@ -682,16 +682,19 @@ mod tests {
     fn inquiry_accepts_a_non_first_camera_address() {
         let camera = UdpSocket::bind("127.0.0.1:0").expect("bind fake camera");
         let port = camera.local_addr().unwrap().port();
+        let (tx, rx) = std::sync::mpsc::channel();
         std::thread::spawn(move || {
             let mut packet = [0u8; 128];
             let (n, source) = camera.recv_from(&mut packet).expect("receive inquiry");
-            assert_eq!(&packet[8..n], &[0x82, 0x09, 0x06, 0x12, 0xFF]);
+            let _ = tx.send(packet[..n].to_vec());
             let reply = sony_encapsulate(
                 &[0xA0, 0x50, 0x01, 0x02, 0x03, 0x04, 0x00, 0x0A, 0x0B, 0x0C, 0xFF],
                 3,
             );
             camera.send_to(&reply, source).unwrap();
         });
+        let sent = rx.recv().expect("request");
+        assert_eq!(&sent[8..], &[0x82, 0x09, 0x06, 0x12, 0xFF]);
         let bytes = query_blocking("127.0.0.1", port, Protocol::SonyUdp, &pan_tilt_pos_inq(2))
             .expect("camera 2 reply");
         assert_eq!(parse_pan_tilt_pos(&bytes), Some((0x1234, 0x0ABC)));

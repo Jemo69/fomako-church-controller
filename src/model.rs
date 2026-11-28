@@ -433,7 +433,11 @@ impl App {
     pub fn select_camera(&mut self, i: usize) {
         self.selected = i.min(self.cameras.len().saturating_sub(1));
         self.track_on = false;
-        self.track_status = "Off — camera aims manually".to_string();
+        self.track_status = if self.follow_on && self.selected == self.follow_follower {
+            "Off — driven by cross-camera follow".to_string()
+        } else {
+            "Off — camera aims manually".to_string()
+        };
     }
 
     pub fn push_log(&mut self, msg: String) {
@@ -745,6 +749,18 @@ mod follow_tests {
         assert!(!app.follow_poll());
         assert!(!app.follow_ready);
         assert_ne!(app.follow_pan_offset, 111);
+    }
+
+    #[test]
+    fn follower_tracking_guard_blocks_toggle_while_following() {
+        let mut app = App::new();
+        app.follow_on = true;
+        app.follow_follower = 0;
+        app.selected = 0;
+        app.track_on = true;
+        crate::actions::toggle_tracking(&mut app);
+        assert!(app.track_on);
+        assert!(app.status.contains("Stop cross-camera follow"), "{}", app.status);
     }
 
     #[test]

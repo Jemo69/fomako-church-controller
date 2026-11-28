@@ -180,6 +180,10 @@ pub fn set_tracking_mode(app: &mut App, area: bool) {
 /// Switch to the next person (F4 on the IR remote; not in the VISCA manual,
 /// so this only stops and restarts tracking, which makes the camera re-acquire).
 pub fn tracking_next_target(app: &mut App) {
+    if app.follow_on && app.selected == app.follow_follower {
+        app.set_status("Stop cross-camera follow before changing the follower's tracking.".into());
+        return;
+    }
     if !app.track_on {
         app.set_status("AI Tracking: turn tracking on first".into());
         return;

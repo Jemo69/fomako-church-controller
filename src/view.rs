@@ -948,6 +948,10 @@ fn camera_list(s: &App, t: rune::tok::Theme, touch: bool) -> El {
                     s.set_status(format!("Selected {}", s.current().name.clone()));
                 }))
                 .child(btn_labeled("Test", &format!("Test {}", name), &format!("test-{}", i), t, 64.0, bh, move |s: &mut App| {
+                    if s.follow_on && i == s.follow_follower {
+                        s.set_status("Stop cross-camera follow before testing the follower.".into());
+                        return;
+                    }
                     let cam = s.cameras.get(i).cloned().unwrap_or_default();
                     let payload = crate::visca::pan_tilt_drive(cam.address, 8, 8, crate::visca::PtDir::Stop);
                     let hex = crate::visca::hex(&payload);
