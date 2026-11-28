@@ -627,6 +627,10 @@ fn follow_start(app: &mut App) {
     }
     #[cfg(not(target_arch = "wasm32"))]
     {
+        if app.selected == f && app.track_on {
+            app.track_on = false;
+            app.track_status = "Off — driven by cross-camera follow".to_string();
+        }
         let leader = app.cameras[l].clone();
         let follower = app.cameras[f].clone();
         let spec = FollowSpec {
@@ -676,6 +680,10 @@ pub fn follow_calibrate(app: &mut App) {
     }
     #[cfg(not(target_arch = "wasm32"))]
     {
+        if app.selected == f && app.track_on {
+            app.track_on = false;
+            app.track_status = "Off — driven by cross-camera follow".to_string();
+        }
         let leader = app.cameras[l].clone();
         let follower = app.cameras[f].clone();
         let slot = app.follow_slot.clone();
