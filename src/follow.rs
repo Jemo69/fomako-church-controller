@@ -227,8 +227,8 @@ pub fn calibrate(leader: &CameraConfig, follower: &CameraConfig) -> Result<(i32,
     }
     let (pan, tilt) = offset_from(first, follower_pos);
     Ok((
-        pan.clamp(-OFFSET_MAX, OFFSET_MAX),
-        tilt.clamp(-OFFSET_MAX, OFFSET_MAX),
+        pan.clamp(i16::MIN as i32, OFFSET_MAX),
+        tilt.clamp(i16::MIN as i32, OFFSET_MAX),
     ))
 }
 
@@ -274,7 +274,7 @@ pub fn start(
         let (follower_protocol, follower_port) = proto(&spec.follower);
         let mut tracking_off_error = None;
         let mut last_tracking_off = std::time::Instant::now();
-        if let Err(error) = visca::send_only(
+        if let Err(error) = visca::send_ack(
             &spec.follower.ip,
             follower_port,
             follower_protocol,
@@ -293,7 +293,7 @@ pub fn start(
             if tracking_off_error.is_some() && last_tracking_off.elapsed() >= RESEND {
                 last_tracking_off = std::time::Instant::now();
                 let (protocol, port) = proto(&spec.follower);
-                match visca::send_only(
+                match visca::send_ack(
                     &spec.follower.ip,
                     port,
                     protocol,
@@ -369,10 +369,6 @@ pub fn start(
                         break;
                     }
                     if tick_error {
-                        sleep_while(gen, &current, TICK);
-                        continue;
-                    }
-                    if tracking_off_error.is_some() {
                         sleep_while(gen, &current, TICK);
                         continue;
                     }

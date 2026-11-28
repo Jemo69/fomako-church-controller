@@ -53,7 +53,7 @@ FoMaKo AI-tracking models (FMK/K600/K630 Gen 3 and similar) auto-track a person 
 
 This app therefore mirrors the leader's aim instead of sharing the subject:
 
-1. Turn tracking ON for the leader with the Control page card, its remote (`F2`), or its web page.
+1. Turn tracking ON for the leader with the Control page card or the camera web page.
 2. Turn the follower's own AI tracking **off**, or the two controllers fight.
 3. Point both cameras at the same landmark and hold both still. Press **Calibrate** — the app samples both pan/tilt positions twice, rejects a reading if either camera moved, and stores the offset (`fomako-follow.json`, working directory first, then beside the app).
 4. Press **Start** on the Control page. The app polls the leader's `8x 09 06 12 FF` position about 8×/s while it answers (slower when it does not) and sends the follower `8x 01 06 02 …`.

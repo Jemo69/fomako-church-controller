@@ -521,6 +521,74 @@ pub fn send_only(ip: &str, port: u16, protocol: Protocol, payload: &[u8]) -> Res
     }
 }
 
+/// Send a command and require an ACK/completion. Used where silence must not
+/// be mistaken for success (e.g. turning a follower's AI tracking off).
+pub fn send_ack(ip: &str, port: u16, protocol: Protocol, payload: &[u8]) -> Result<(), String> {
+    match protocol {
+        Protocol::SonyUdp => {
+            let seq = SEQ.fetch_add(1, Ordering::SeqCst);
+            let packet = sony_encapsulate(payload, seq);
+            let local = if ip.contains(':') { "[::]:0" } else { "0.0.0.0:0" };
+            let sock = UdpSocket::bind(local).map_err(|e| format!("udp bind: {e}"))?;
+            sock.set_read_timeout(Some(Duration::from_millis(250)))
+                .map_err(|e| format!("timeout: {e}"))?;
+            sock.set_write_timeout(Some(Duration::from_millis(800)))
+                .map_err(|e| format!("timeout: {e}"))?;
+            let target = format!("{}:{}", ip, port);
+            sock.send_to(&packet, &target)
+                .map_err(|e| format!("send {}: {e}", target))?;
+            let mut buf = [0u8; 128];
+            let (n, _) = sock
+                .recv_from(&mut buf)
+                .map_err(|_| "camera did not acknowledge".to_string())?;
+            let reply = &buf[..n];
+            let body = if reply.len() >= 8 && reply[..2] == [0x01, 0x00] {
+                &reply[8..]
+            } else {
+                reply
+            };
+            if let Some(error) = camera_error(body) {
+                return Err(error);
+            }
+            if body.len() >= 2 && body[0] >= 0x90 && body[0] & 0x0F == 0 && (body[1] & 0xF0 == 0x40 || body[1] & 0xF0 == 0x50)
+            {
+                Ok(())
+            } else {
+                Err("camera did not acknowledge".to_string())
+            }
+        }
+        Protocol::IpViscaTcp => {
+            use std::io::{Read, Write};
+            let target = format!("{}:{}", ip, port);
+            let mut stream = TcpStream::connect_timeout(&resolve(&target)?, Duration::from_millis(1200))
+                .map_err(|e| format!("tcp {}: {e}", target))?;
+            stream
+                .set_read_timeout(Some(Duration::from_millis(600)))
+                .map_err(|e| format!("timeout: {e}"))?;
+            stream
+                .set_write_timeout(Some(Duration::from_millis(800)))
+                .map_err(|e| format!("timeout: {e}"))?;
+            stream
+                .write_all(payload)
+                .map_err(|e| format!("write: {e}"))?;
+            let mut buf = [0u8; 128];
+            let n = stream
+                .read(&mut buf)
+                .map_err(|_| "camera did not acknowledge".to_string())?;
+            let body = &buf[..n];
+            if let Some(error) = camera_error(body) {
+                return Err(error);
+            }
+            if body.len() >= 2 && body[0] >= 0x90 && body[0] & 0x0F == 0 && (body[1] & 0xF0 == 0x40 || body[1] & 0xF0 == 0x50)
+            {
+                Ok(())
+            } else {
+                Err("camera did not acknowledge".to_string())
+            }
+        }
+    }
+}
+
 /// Send an inquiry and return its first position/completion reply payload.
 pub fn query_blocking(ip: &str, port: u16, protocol: Protocol, payload: &[u8]) -> Result<Vec<u8>, String> {
     match protocol {
@@ -542,6 +610,11 @@ pub fn query_blocking(ip: &str, port: u16, protocol: Protocol, payload: &[u8]) -
                     Ok((n, _)) => {
                         let reply = &buf[..n];
                         let body = if reply.len() >= 8 && reply[..2] == [0x01, 0x00] {
+                            let reply_seq =
+                                u32::from_be_bytes([reply[4], reply[5], reply[6], reply[7]]);
+                            if reply_seq != seq {
+                                continue;
+                            }
                             &reply[8..]
                         } else {
                             reply
@@ -686,10 +759,11 @@ mod tests {
         std::thread::spawn(move || {
             let mut packet = [0u8; 128];
             let (n, source) = camera.recv_from(&mut packet).expect("receive inquiry");
+            let seq = u32::from_be_bytes([packet[4], packet[5], packet[6], packet[7]]);
             let _ = tx.send(packet[..n].to_vec());
             let reply = sony_encapsulate(
                 &[0xA0, 0x50, 0x01, 0x02, 0x03, 0x04, 0x00, 0x0A, 0x0B, 0x0C, 0xFF],
-                3,
+                seq,
             );
             camera.send_to(&reply, source).unwrap();
         });
@@ -728,11 +802,12 @@ mod tests {
         let port = camera.local_addr().unwrap().port();
         std::thread::spawn(move || {
             let mut packet = [0u8; 128];
-            let (_, source) = camera.recv_from(&mut packet).expect("receive inquiry");
-            let ack = sony_encapsulate(&[0x90, 0x41, 0xFF], 1);
+            let (n, source) = camera.recv_from(&mut packet).expect("receive inquiry");
+            let seq = u32::from_be_bytes([packet[4], packet[5], packet[6], packet[7]]);
+            let ack = sony_encapsulate(&[0x90, 0x41, 0xFF], seq);
             let reply = sony_encapsulate(
                 &[0x90, 0x50, 0x01, 0x02, 0x03, 0x04, 0x00, 0x0A, 0x0B, 0x0C, 0xFF],
-                2,
+                seq,
             );
             camera.send_to(&ack, source).unwrap();
             camera.send_to(&reply, source).unwrap();
