@@ -3,6 +3,8 @@ package com.fomako.controller
 import androidx.compose.foundation.horizontalScroll
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Column
+import androidx.compose.foundation.layout.ExperimentalLayoutApi
+import androidx.compose.foundation.layout.FlowRow
 import androidx.compose.foundation.layout.Row
 import androidx.compose.foundation.layout.defaultMinSize
 import androidx.compose.foundation.layout.fillMaxWidth
@@ -173,7 +175,7 @@ fun ImageScreen(state: ControllerState) {
             label = "Brightness",
             value = state.brightness,
             range = 0..14,
-            hint = "Same as the Picture tab brightness slider",
+            hint = "Same effect as the Picture tab brightness slider",
             code = "VISCA A1",
             onValue = { state.brightness = it },
             onApply = { state.sendVisca("Brightness", "brightness", state.brightness) },
@@ -191,7 +193,7 @@ fun ImageScreen(state: ControllerState) {
             label = "Saturation",
             value = state.saturation,
             range = 0..14,
-            hint = "0 = black and white, higher = more vivid colour",
+            hint = "0 = least colour (60%), 14 = most (200%)",
             code = "VISCA 49",
             onValue = { state.saturation = it },
             onApply = { state.sendVisca("Saturation", "saturation", state.saturation) },
@@ -290,6 +292,7 @@ private fun ModeChips(
  * a plain number (no hex) between − and +, and the Apply button in the same
  * group so it is obvious which value it sends.
  */
+@OptIn(ExperimentalLayoutApi::class)
 @Composable
 private fun NumberRow(
     label: String,
@@ -310,10 +313,11 @@ private fun NumberRow(
             style = MaterialTheme.typography.labelSmall,
             color = MaterialTheme.colorScheme.onSurfaceVariant,
         )
-        Row(
+        FlowRow(
             modifier = Modifier.fillMaxWidth(),
-            verticalAlignment = Alignment.CenterVertically,
-            horizontalArrangement = Arrangement.spacedBy(8.dp)
+            verticalArrangement = Arrangement.spacedBy(6.dp),
+            horizontalArrangement = Arrangement.spacedBy(8.dp),
+            itemVerticalAlignment = Alignment.CenterVertically,
         ) {
             OutlinedButton(
                 onClick = { onValue((value - 1).coerceAtLeast(range.first)) },
@@ -340,7 +344,6 @@ private fun NumberRow(
             Button(
                 onClick = onApply,
                 modifier = Modifier
-                    .weight(1f)
                     .defaultMinSize(minWidth = 96.dp, minHeight = 48.dp)
                     .semantics { contentDescription = "Send $label to the camera" },
             ) { Text("Apply") }

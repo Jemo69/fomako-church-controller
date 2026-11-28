@@ -114,6 +114,19 @@ fn setting_row(t: rune::tok::Theme, dark: bool, touch: bool, key: &str, label: &
     let bw = if touch { 44.0 } else { 34.0 };
     let bh = if touch { 44.0 } else { 28.0 };
     let caption = format!("{} · range {}–{} · {}", hint, min, max, code);
+    let step = |glyph: &'static str, a11y: String, key: String, usable: bool, next: u8| {
+        let b = el().key(key).w(bw).h(bh).center().radius(8.0)
+            .fill(t.card).border(1.0, t.card_border)
+            .role("button").label(a11y);
+        if usable {
+            b.hover(t.hover).press(t.press).focusable(true)
+                .on_press(move |s: &mut App| on_value(s, next))
+                .child(text(glyph).font(type_::BODY).color(t.text).a11y_hidden())
+        } else {
+            b.disabled(true)
+                .child(text(glyph).font(type_::BODY).color(t.text_secondary).a11y_hidden())
+        }
+    };
     row().key(key.to_owned()).w_full().min_h(bh + 8.0).py(4.0).center_y().gap(8.0).flex_wrap()
         .child(
             col().key(format!("{}-text", key)).grow(1.0).min_w(180.0).gap(2.0)
@@ -123,16 +136,13 @@ fn setting_row(t: rune::tok::Theme, dark: bool, touch: bool, key: &str, label: &
         // Keep the dial and Apply in one group so a narrow window wraps them together.
         .child(
             row().key(format!("{}-ctl", key)).center_y().gap(8.0)
-                .child(btn_labeled("−", &format!("Decrease {}", label), &format!("{}-minus", key), t, bw, bh, move |s: &mut App| {
-                    on_value(s, value.saturating_sub(1).max(min));
-                }))
+                .child(step("−", format!("Decrease {}", label), format!("{}-minus", key), value > min, value.saturating_sub(1).max(min)))
                 .child(
                     el().key(format!("{}-value", key)).min_w(40.0).center()
+                        .role("text").label(format!("{} is {}", label, value))
                         .child(text(value.to_string()).font(type_::MONO_CAPTION).color(t.text))
                 )
-                .child(btn_labeled("+", &format!("Increase {}", label), &format!("{}-plus", key), t, bw, bh, move |s: &mut App| {
-                    on_value(s, value.saturating_add(1).min(max));
-                }))
+                .child(step("+", format!("Increase {}", label), format!("{}-plus", key), value < max, value.saturating_add(1).min(max)))
                 .child(accent_btn_labeled("Apply", &format!("Apply {}", label), &format!("{}-apply", key), dark, 76.0, bh, on_apply))
         )
 }
@@ -449,11 +459,11 @@ fn image_page(s: &App, t: rune::tok::Theme, dark: bool, touch: bool) -> El {
         .child(setting_row(t, dark, touch, "bgain", "Blue gain", "Fine-tunes colour in Manual white balance", "VISCA 44", 0, 255, s.b_gain,
             |s, v| s.b_gain = v, actions::apply_b_gain))
         .child(section_title(t, "Picture"))
-        .child(setting_row(t, dark, touch, "brightness", "Brightness", "Same as the Picture tab brightness slider", "VISCA A1", 0, 14, s.brightness,
+        .child(setting_row(t, dark, touch, "brightness", "Brightness", "Same effect as the Picture tab brightness slider", "VISCA A1", 0, 14, s.brightness,
             |s, v| s.brightness = v, actions::apply_brightness))
         .child(setting_row(t, dark, touch, "contrast", "Contrast", "Higher number = punchier picture", "VISCA A2", 0, 14, s.contrast,
             |s, v| s.contrast = v, actions::apply_contrast))
-        .child(setting_row(t, dark, touch, "sat", "Saturation", "0 = black and white, higher = more vivid", "VISCA 49", 0, 14, s.saturation,
+        .child(setting_row(t, dark, touch, "sat", "Saturation", "0 = least colour (60%), 14 = most (200%)", "VISCA 49", 0, 14, s.saturation,
             |s, v| s.saturation = v, actions::apply_saturation))
         .child(setting_row(t, dark, touch, "aperture", "Sharpness", "Detail enhancement; too high looks crunchy", "VISCA 42", 0, 15, s.aperture,
             |s, v| s.aperture = v, actions::apply_aperture))
@@ -488,7 +498,7 @@ fn exposure_row(s: &App, t: rune::tok::Theme, dark: bool, touch: bool) -> El {
 
 fn wb_row(s: &App, t: rune::tok::Theme, dark: bool, touch: bool) -> El {
     let modes = ["Auto", "3000K", "4000K", "1-Push", "Manual", "6500K"];
-    let ch = if touch { 40.0 } else { 26.0 };
+    let ch = if touch { 40.0 } else { 28.0 };
     chip_row(t, dark, "wb", &format!("Mode: {}", s.wb_label()), "White balance", &modes, &[0, 1, 2, 3, 5, 6], s.wb_mode, ch, set_wb_mode)
 }
 
