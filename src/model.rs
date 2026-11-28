@@ -244,7 +244,7 @@ pub struct App {
     pub follow_status: String,
     pub follow_ready: bool,
     pub follow_gen: Arc<AtomicU64>,
-    pub follow_slot: Arc<Mutex<Option<crate::follow::FollowEvent>>>,
+    pub follow_slot: Arc<Mutex<Vec<crate::follow::FollowEvent>>>,
     pub follow_waker: Option<rune::Waker>,
 }
 
@@ -283,7 +283,13 @@ impl App {
                 let leader = cameras.iter().position(|c| c.ip == sv.leader_ip);
                 let follower = cameras.iter().position(|c| c.ip == sv.follower_ip);
                 match (leader, follower) {
-                    (Some(l), Some(f)) if l != f => (l, f, sv.pan_offset, sv.tilt_offset, true),
+                    (Some(l), Some(f)) if l != f => (
+                        l,
+                        f,
+                        sv.pan_offset.clamp(-crate::follow::OFFSET_MAX, crate::follow::OFFSET_MAX),
+                        sv.tilt_offset.clamp(-crate::follow::OFFSET_MAX, crate::follow::OFFSET_MAX),
+                        true,
+                    ),
                     _ => (0, 1, 0, 0, false),
                 }
             }
@@ -398,7 +404,7 @@ impl App {
             follow_status: "Idle — calibrate both cameras on one landmark, then Start.".to_string(),
             follow_ready,
             follow_gen: Arc::new(AtomicU64::new(0)),
-            follow_slot: Arc::new(Mutex::new(None)),
+            follow_slot: Arc::new(Mutex::new(Vec::new())),
             follow_waker: None,
         };
         if s.cameras.is_empty() {
@@ -552,72 +558,82 @@ impl App {
 
     /// Drain follow-loop updates; call from AppSpec::poll. True when changed.
     pub fn follow_poll(&mut self) -> bool {
-        let event = self.follow_slot.lock().ok().and_then(|mut s| s.take());
-        match event {
-            Some(crate::follow::FollowEvent::Status(msg)) => {
-                if !self.follow_on || self.follow_status == msg {
-                    false
-                } else {
-                    self.follow_status = msg;
-                    true
-                }
-            }
-            Some(crate::follow::FollowEvent::Error(msg)) => {
-                if !self.follow_on {
-                    return false;
-                }
-                let text = format!("follow error — {}", msg);
-                if self.follow_status == text {
-                    false
-                } else {
-                    self.follow_status = text.clone();
-                    self.push_log(text);
-                    true
-                }
-            }
-            Some(crate::follow::FollowEvent::Calibrated { gen, pan, tilt }) => {
-                if gen != self.follow_gen.load(std::sync::atomic::Ordering::SeqCst) {
-                    return false;
-                }
-                self.follow_pan_offset = pan;
-                self.follow_tilt_offset = tilt;
-                self.follow_ready = true;
-                self.follow_status = format!(
-                    "Calibrated — offset pan {:+#}, tilt {:+#} steps. Start when ready.",
-                    pan, tilt
-                );
-                self.push_log(format!("Follow calibrated: pan {:+} tilt {:+}", pan, tilt));
-                self.save_follow_offsets();
-                true
-            }
-            Some(crate::follow::FollowEvent::CalibrationError { gen, msg }) => {
-                if gen != self.follow_gen.load(std::sync::atomic::Ordering::SeqCst) {
-                    return false;
-                }
-                self.follow_ready = false;
-                self.follow_status = format!("Calibration failed — {}", msg);
-                self.push_log(format!("Follow calibration failed: {}", msg));
-                true
-            }
-            None => false,
+        let events = self
+            .follow_slot
+            .lock()
+            .map(|mut s| std::mem::take(&mut *s))
+            .unwrap_or_default();
+        if events.is_empty() {
+            return false;
         }
+        let gen = self.follow_gen.load(std::sync::atomic::Ordering::SeqCst);
+        let mut changed = false;
+        for event in events {
+            match event {
+                crate::follow::FollowEvent::Status { gen: g, msg } => {
+                    if g != gen || !self.follow_on || self.follow_status == msg {
+                        continue;
+                    }
+                    self.follow_status = msg;
+                    changed = true;
+                }
+                crate::follow::FollowEvent::Error { gen: g, msg } => {
+                    if g != gen || !self.follow_on {
+                        continue;
+                    }
+                    let text = format!("follow error — {}", msg);
+                    if self.follow_status != text {
+                        self.follow_status = text.clone();
+                        self.push_log(text);
+                        changed = true;
+                    }
+                }
+                crate::follow::FollowEvent::Calibrated { gen: g, pan, tilt } => {
+                    if g != gen {
+                        continue;
+                    }
+                    self.follow_pan_offset = pan;
+                    self.follow_tilt_offset = tilt;
+                    self.follow_ready = true;
+                    let saved = self.save_follow_offsets();
+                    self.follow_status = match saved {
+                        Ok(()) => format!(
+                            "Calibrated — offset pan {:+#}, tilt {:+#} steps. Start when ready.",
+                            pan, tilt
+                        ),
+                        Err(error) => format!(
+                            "Calibrated, but could not save the offset: {}",
+                            error
+                        ),
+                    };
+                    self.push_log(format!("Follow calibrated: pan {:+} tilt {:+}", pan, tilt));
+                    changed = true;
+                }
+                crate::follow::FollowEvent::CalibrationError { gen: g, msg } => {
+                    if g != gen {
+                        continue;
+                    }
+                    self.follow_ready = false;
+                    self.follow_status = format!("Calibration failed — {}", msg);
+                    self.push_log(format!("Follow calibration failed: {}", msg));
+                    changed = true;
+                }
+            }
+        }
+        changed
     }
 
-    fn save_follow_offsets(&self) {
+    fn save_follow_offsets(&self) -> Result<(), String> {
         if self.cameras.len() < 2 {
-            return;
+            return Err("add a second camera first".to_string());
         }
-        let l = self.follow_leader.min(self.cameras.len() - 1);
-        let f = self.follow_follower.min(self.cameras.len() - 1);
-        if l == f {
-            return;
-        }
-        crate::follow::save(&crate::follow::FollowSaved {
-            leader_ip: self.cameras[l].ip.clone(),
-            follower_ip: self.cameras[f].ip.clone(),
-            pan_offset: self.follow_pan_offset,
-            tilt_offset: self.follow_tilt_offset,
-        });
+        crate::follow::save_pair(
+            &self.cameras,
+            self.follow_leader.min(self.cameras.len() - 1),
+            self.follow_follower.min(self.cameras.len() - 1),
+            self.follow_pan_offset,
+            self.follow_tilt_offset,
+        )
     }
 
     #[cfg(test)]
@@ -705,5 +721,46 @@ fn save_cameras(cams: &[CameraConfig]) {
         let _ = std::fs::write(config_path(), j);
         // also try exe dir (may fail without perms; ignore)
         let _ = std::fs::write(exe_dir_file(), serde_json::to_string_pretty(cams).unwrap_or_default());
+    }
+}
+
+#[cfg(test)]
+mod follow_tests {
+    use super::*;
+
+    #[test]
+    fn stale_calibration_is_ignored() {
+        let mut app = App::new();
+        app.follow_ready = false;
+        app.follow_on = true;
+        let gen = app.follow_gen.load(std::sync::atomic::Ordering::SeqCst);
+        app.follow_slot
+            .lock()
+            .unwrap()
+            .push(crate::follow::FollowEvent::Calibrated {
+                gen: gen.wrapping_sub(1),
+                pan: 111,
+                tilt: 222,
+            });
+        assert!(!app.follow_poll());
+        assert!(!app.follow_ready);
+        assert_ne!(app.follow_pan_offset, 111);
+    }
+
+    #[test]
+    fn follow_status_event_from_an_old_thread_is_ignored() {
+        let mut app = App::new();
+        app.follow_on = true;
+        app.follow_status = "Stopped".into();
+        let gen = app.follow_gen.load(std::sync::atomic::Ordering::SeqCst);
+        app.follow_slot
+            .lock()
+            .unwrap()
+            .push(crate::follow::FollowEvent::Status {
+                gen: gen.wrapping_sub(1),
+                msg: "Following — old drives stale".into(),
+            });
+        assert!(!app.follow_poll());
+        assert_eq!(app.follow_status, "Stopped");
     }
 }

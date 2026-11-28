@@ -321,7 +321,7 @@ fn control_page(s: &App, t: rune::tok::Theme, dark: bool, touch: bool) -> El {
     let bh = if touch { 44.0 } else { 32.0 };
     col().key("control").w_full().px(16.0).py(14.0).gap(14.0)
         .child(camera_switcher(s, t, touch))
-        .child(follow_card(s, t, dark, touch, bh))
+        .child(follow_card(s, t, dark, bh))
         .child(preview_pane(s, t, touch))
         .child(tracking_card(s, t, dark, touch))
         .child(row().w_full().gap(14.0).flex_wrap()
@@ -428,7 +428,7 @@ fn tracking_card(s: &App, t: rune::tok::Theme, dark: bool, touch: bool) -> El {
             .w_full().wrap().font(type_::LABEL).color(t.text_secondary))
 }
 
-fn follow_card(s: &App, t: rune::tok::Theme, dark: bool, _touch: bool, bh: f32) -> El {
+fn follow_card(s: &App, t: rune::tok::Theme, dark: bool, bh: f32) -> El {
     let names: Vec<String> = s.cameras.iter().map(|c| c.name.clone()).collect();
     let mut card = col().key("follow").w_full().padding(12.0).radius(8.0)
         .fill(t.card).border(1.0, t.card_border).gap(8.0)
@@ -518,7 +518,7 @@ fn follow_card(s: &App, t: rune::tok::Theme, dark: bool, _touch: bool, bh: f32) 
         .child(text(format!("offset: pan {:+#} · tilt {:+#} steps", s.follow_pan_offset, s.follow_tilt_offset))
             .font(type_::MONO_CAPTION).color(t.text_secondary)));
     card.child(row().w_full().gap(6.0).center_y().flex_wrap()
-        .child(text("Nudge (screen direction):".to_owned()).font(type_::LABEL).color(t.text_secondary))
+        .child(text("Nudge offset:".to_owned()).font(type_::LABEL).color(t.text_secondary))
         .child(btn("Pan ◄", "follow-pan-minus", t, 78.0, bh,
             |s: &mut App| actions::follow_adjust(s, -100, 0)))
         .child(btn("Pan ►", "follow-pan-plus", t, 78.0, bh,
@@ -962,14 +962,22 @@ fn camera_list(s: &App, t: rune::tok::Theme, touch: bool) -> El {
         c = c.child(row().gap(8.0)
             .child(btn("Remove selected", "cam-remove", t, 148.0, if touch { 42.0 } else { 30.0 }, |s: &mut App| {
                 if s.cameras.len() > 1 {
+                    let leader_ip = s.cameras.get(s.follow_leader).map(|c| c.ip.clone());
+                    let follower_ip = s.cameras.get(s.follow_follower).map(|c| c.ip.clone());
                     actions::follow_stop(s);
                     s.follow_ready = false;
                     s.cameras.remove(s.selected);
                     s.select_camera(0);
                     s.selected = 0;
                     let last = s.cameras.len() - 1;
-                    s.follow_leader = s.follow_leader.min(last);
-                    s.follow_follower = s.follow_follower.min(last);
+                    s.follow_leader = leader_ip
+                        .and_then(|ip| s.cameras.iter().position(|c| c.ip == ip))
+                        .unwrap_or(0)
+                        .min(last);
+                    s.follow_follower = follower_ip
+                        .and_then(|ip| s.cameras.iter().position(|c| c.ip == ip))
+                        .unwrap_or(if last > 0 { 1 } else { 0 })
+                        .min(last);
                     if s.follow_leader == s.follow_follower {
                         s.follow_follower = if s.follow_leader == 0 && last > 0 { 1 } else { 0 };
                     }

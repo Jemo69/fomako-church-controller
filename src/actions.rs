@@ -4,7 +4,7 @@ use std::sync::{Arc, Mutex};
 use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 
 use crate::discover::{self, ScanEvent, ScanHandle};
-use crate::follow::{self, FollowSaved};
+use crate::follow;
 #[cfg(not(target_arch = "wasm32"))]
 use crate::follow::{FollowEvent, FollowSpec};
 use crate::model::{App, ScanState};
@@ -590,22 +590,10 @@ fn follow_pair(app: &App) -> Option<(usize, usize)> {
     (l != f && app.cameras[l].ip != app.cameras[f].ip).then_some((l, f))
 }
 
-fn save_follow(app: &App) {
-    let Some((l, f)) = follow_pair(app) else {
-        return;
-    };
-    follow::save(&FollowSaved {
-        leader_ip: app.cameras[l].ip.clone(),
-        follower_ip: app.cameras[f].ip.clone(),
-        pan_offset: app.follow_pan_offset,
-        tilt_offset: app.follow_tilt_offset,
-    });
-}
-
 pub fn follow_stop(app: &mut App) {
     app.follow_gen.fetch_add(1, Ordering::SeqCst);
     if let Ok(mut slot) = app.follow_slot.lock() {
-        *slot = None;
+        slot.clear();
     }
     if app.follow_on {
         app.follow_status = "Stopped — leader aim is no longer sent to the follower.".to_string();
@@ -659,8 +647,16 @@ fn follow_start(app: &mut App) {
             app.follow_waker.clone(),
         );
         app.follow_on = true;
-        app.follow_status = format!("Following — {} drives {}.", leader.name, follower.name);
-        save_follow(app);
+        app.follow_status = follow::following_note(&leader.name, &follower.name);
+        if let Err(error) = follow::save_pair(
+            &app.cameras,
+            l,
+            f,
+            app.follow_pan_offset,
+            app.follow_tilt_offset,
+        ) {
+            app.push_log(format!("Follow offset not saved: {}", error));
+        }
     }
 }
 
@@ -693,7 +689,7 @@ pub fn follow_calibrate(app: &mut App) {
                 Err(msg) => FollowEvent::CalibrationError { gen, msg },
             };
             if let Ok(mut s) = slot.lock() {
-                *s = Some(event);
+                s.push(event);
             }
             if let Some(w) = wake {
                 w();
@@ -709,8 +705,8 @@ pub fn follow_adjust(app: &mut App, pan_delta: i32, tilt_delta: i32) {
         return;
     }
     let was_running = app.follow_on;
-    app.follow_pan_offset = (app.follow_pan_offset + pan_delta).clamp(-follow::POS_MAX, follow::POS_MAX);
-    app.follow_tilt_offset = (app.follow_tilt_offset + tilt_delta).clamp(-follow::POS_MAX, follow::POS_MAX);
+    app.follow_pan_offset = (app.follow_pan_offset + pan_delta).clamp(-follow::OFFSET_MAX, follow::OFFSET_MAX);
+    app.follow_tilt_offset = (app.follow_tilt_offset + tilt_delta).clamp(-follow::OFFSET_MAX, follow::OFFSET_MAX);
     if was_running {
         // Restart the loop so the new offset takes effect now.
         follow_stop(app);
@@ -720,7 +716,17 @@ pub fn follow_adjust(app: &mut App, pan_delta: i32, tilt_delta: i32) {
             "Offset pan {:+#}, tilt {:+#} steps — fine-tune while following.",
             app.follow_pan_offset, app.follow_tilt_offset
         );
-        save_follow(app);
+        if let Some((l, f)) = follow_pair(app) {
+            if let Err(error) = follow::save_pair(
+                &app.cameras,
+                l,
+                f,
+                app.follow_pan_offset,
+                app.follow_tilt_offset,
+            ) {
+                app.push_log(format!("Follow offset not saved: {}", error));
+            }
+        }
     }
 }
 

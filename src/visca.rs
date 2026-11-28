@@ -123,7 +123,7 @@ pub fn parse_pan_tilt_pos(reply: &[u8]) -> Option<(u16, u16)> {
     };
     if payload.len() < 11
         || payload[0] & 0x0F != 0
-        || payload[0] & 0x80 == 0
+        || payload[0] < 0x90
         || payload[1] != 0x50
         || payload[10] != 0xFF
     {
@@ -459,7 +459,7 @@ pub fn send_blocking(ip: &str, port: u16, protocol: Protocol, payload: &[u8]) ->
 /// ACK (not a rejection); `90 6x` is the only error that is reported.
 pub fn send_only(ip: &str, port: u16, protocol: Protocol, payload: &[u8]) -> Result<(), String> {
     fn check(body: &[u8]) -> Result<(), String> {
-        if body.len() >= 2 && body[0] & 0x0F == 0 && body[0] & 0x80 != 0 && body[1] & 0xF0 == 0x60 {
+        if body.len() >= 2 && body[0] >= 0x90 && body[0] & 0x0F == 0 && body[1] & 0xF0 == 0x60 {
             return Err(format!("camera error ({})", hex(body)));
         }
         Ok(())
@@ -536,7 +536,7 @@ pub fn query_blocking(ip: &str, port: u16, protocol: Protocol, payload: &[u8]) -
                         } else {
                             reply
                         };
-                        if body.len() >= 2 && body[0] & 0x0F == 0 && body[0] & 0x80 != 0 {
+                        if body.len() >= 2 && body[0] >= 0x90 && body[0] & 0x0F == 0 {
                             if body[1] == 0x50 {
                                 return Ok(reply.to_vec());
                             }
@@ -570,19 +570,23 @@ pub fn query_blocking(ip: &str, port: u16, protocol: Protocol, payload: &[u8]) -
                 .map_err(|e| format!("write: {e}"))?;
             let mut pending = Vec::new();
             let mut buf = [0u8; 128];
+            let deadline = std::time::Instant::now() + Duration::from_millis(700);
             loop {
+                if std::time::Instant::now() > deadline {
+                    break;
+                }
                 match stream.read(&mut buf) {
                     Ok(0) => break,
                     Ok(n) => {
                         pending.extend_from_slice(&buf[..n]);
                         while let Some(end) = pending.iter().position(|&b| b == 0xFF) {
                             let frame: Vec<u8> = pending.drain(..=end).collect();
-                            let body = if frame.len() >= 10 && frame[..2] == [0x01, 0x00] {
+                            let body = if frame.len() >= 8 && frame[..2] == [0x01, 0x00] {
                                 &frame[8..]
                             } else {
                                 &frame[..]
                             };
-                            if body.len() >= 2 && body[0] & 0x0F == 0 && body[0] & 0x80 != 0 {
+                            if body.len() >= 2 && body[0] >= 0x90 && body[0] & 0x0F == 0 {
                                 if body[1] == 0x50 {
                                     return Ok(frame);
                                 }
@@ -656,7 +660,7 @@ mod tests {
         assert_eq!(
             pan_tilt_absolute(1, 12, 0x20, 0x1234, 0x0ABC),
             vec![
-                0x81, 0x01, 0x06, 0x02, 12, 0x14, // speeds clamp to pan 24 / tilt 20
+                0x81, 0x01, 0x06, 0x02, 12, 0x14, // pan stays 12; tilt clamps to 0x14
                 0x01, 0x02, 0x03, 0x04, 0x00, 0x0A, 0x0B, 0x0C, 0xFF
             ]
         );

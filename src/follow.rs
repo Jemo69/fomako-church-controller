@@ -16,7 +16,6 @@
 use std::sync::atomic::{AtomicU64, Ordering};
 #[cfg(not(target_arch = "wasm32"))]
 use std::sync::{Arc, Mutex};
-#[cfg(not(target_arch = "wasm32"))]
 use std::time::Duration;
 
 use serde::{Deserialize, Serialize};
@@ -25,18 +24,26 @@ use crate::model::CameraConfig;
 #[cfg(not(target_arch = "wasm32"))]
 use crate::visca::{self, Protocol};
 
-/// Position values are 16-bit linear counts (`0Y 0Y 0Y 0Y`).
+/// Position values are 16-bit VISCA counts (`0Y 0Y 0Y 0Y`).
 pub const POS_MAX: i32 = 0xFFFF;
-const DEADBAND: i32 = 3;
+/// Shortest signed delta never exceeds half the circle.
+pub const OFFSET_MAX: i32 = 0x7FFF;
+/// ~0.1° at the documented ~0.5° per 100 counts; the camera's own aim accuracy.
+pub const DEADBAND: i32 = 20;
+const RESEND: Duration = Duration::from_secs(2);
 #[cfg(not(target_arch = "wasm32"))]
 const TICK: Duration = Duration::from_millis(120);
 
 #[derive(Clone, Debug)]
 pub enum FollowEvent {
-    Status(String),
-    Error(String),
+    Status { gen: u64, msg: String },
+    Error { gen: u64, msg: String },
     Calibrated { gen: u64, pan: i32, tilt: i32 },
     CalibrationError { gen: u64, msg: String },
+}
+
+pub fn following_note(leader: &str, follower: &str) -> String {
+    format!("Following — {} drives {}.", leader, follower)
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
@@ -47,7 +54,7 @@ pub struct FollowSaved {
     pub tilt_offset: i32,
 }
 
-fn saved_paths() -> Vec<std::path::PathBuf> {
+fn paths() -> Vec<std::path::PathBuf> {
     let cwd = std::path::PathBuf::from("fomako-follow.json");
     let exe = std::env::current_exe()
         .ok()
@@ -58,23 +65,67 @@ fn saved_paths() -> Vec<std::path::PathBuf> {
     }
 }
 
+fn load_from(path: &std::path::Path) -> Option<FollowSaved> {
+    let text = std::fs::read_to_string(path).ok()?;
+    serde_json::from_str(&text).ok()
+}
+
 pub fn load_saved() -> Option<FollowSaved> {
-    for path in saved_paths() {
-        if let Ok(text) = std::fs::read_to_string(&path) {
-            if let Ok(saved) = serde_json::from_str::<FollowSaved>(&text) {
-                return Some(saved);
+    paths().iter().find_map(|path| load_from(path))
+}
+
+fn write_one(path: &std::path::Path, text: &str) -> Result<(), String> {
+    let tmp = path.with_extension("json.tmp");
+    std::fs::write(&tmp, text).map_err(|e| format!("{}: {e}", tmp.display()))?;
+    // Windows rename refuses to replace; remove the old copy first.
+    if path.exists() {
+        let _ = std::fs::remove_file(path);
+    }
+    std::fs::rename(&tmp, path).map_err(|e| format!("{}: {e}", path.display()))
+}
+
+/// Write every portable copy. A read-only location does not discard a writable one.
+pub fn save(saved: &FollowSaved) -> Result<(), String> {
+    let text = serde_json::to_string_pretty(saved).map_err(|e| e.to_string())?;
+    let mut first_error = None;
+    let mut wrote = false;
+    for path in paths() {
+        match write_one(&path, &text) {
+            Ok(()) => wrote = true,
+            Err(error) => {
+                if first_error.is_none() {
+                    first_error = Some(error);
+                }
             }
         }
     }
-    None
+    if wrote {
+        Ok(())
+    } else {
+        Err(first_error.unwrap_or_else(|| "no writable config location".to_string()))
+    }
 }
 
-pub fn save(saved: &FollowSaved) {
-    if let Ok(text) = serde_json::to_string_pretty(saved) {
-        for path in saved_paths() {
-            let _ = std::fs::write(path, &text);
-        }
+/// Persist the calibrated pair; rejects the same camera twice.
+pub fn save_pair(
+    cameras: &[CameraConfig],
+    leader: usize,
+    follower: usize,
+    pan_offset: i32,
+    tilt_offset: i32,
+) -> Result<(), String> {
+    if leader >= cameras.len() || follower >= cameras.len() || leader == follower {
+        return Err("pick two different cameras".to_string());
     }
+    if cameras[leader].ip == cameras[follower].ip {
+        return Err("pick two different cameras (same IP)".to_string());
+    }
+    save(&FollowSaved {
+        leader_ip: cameras[leader].ip.clone(),
+        follower_ip: cameras[follower].ip.clone(),
+        pan_offset,
+        tilt_offset,
+    })
 }
 
 #[cfg(not(target_arch = "wasm32"))]
@@ -100,14 +151,23 @@ pub fn query_pos(cam: &CameraConfig) -> Result<(u16, u16), String> {
     })
 }
 
+/// Shortest signed delta on the 16-bit circle. FoMaKo/Sony positions are
+/// signed two's complement around home, so `0x0010 → 0xFFF0` is -32, not
+/// +65504.
+pub fn shortest_delta(leader: u16, follower: u16) -> i32 {
+    let delta = (follower as i32 - leader as i32).rem_euclid(0x1_0000);
+    if delta > 0x7FFF {
+        delta - 0x1_0000
+    } else {
+        delta
+    }
+}
+
 /// Offset that maps leader aim to follower aim at one shared point.
-pub fn offset_from(
-    leader: (u16, u16),
-    follower: (u16, u16),
-) -> (i32, i32) {
+pub fn offset_from(leader: (u16, u16), follower: (u16, u16)) -> (i32, i32) {
     (
-        follower.0 as i32 - leader.0 as i32,
-        follower.1 as i32 - leader.1 as i32,
+        shortest_delta(leader.0, follower.0),
+        shortest_delta(leader.1, follower.1),
     )
 }
 
@@ -116,24 +176,31 @@ pub fn calibrate(leader: &CameraConfig, follower: &CameraConfig) -> Result<(i32,
     if leader.ip == follower.ip {
         return Err("pick two different cameras".to_string());
     }
-    let leader_pos = query_pos(leader)?;
+    let first = query_pos(leader)?;
     let follower_pos = query_pos(follower)?;
-    Ok(offset_from(leader_pos, follower_pos))
+    let second = query_pos(leader)?;
+    if shortest_delta(first.0, second.0).abs() > DEADBAND
+        || shortest_delta(first.1, second.1).abs() > DEADBAND
+    {
+        return Err("a camera moved during calibration — hold still and retry".to_string());
+    }
+    Ok(offset_from(first, follower_pos))
 }
 
-/// Map a leader position through the calibrated offset, clamped to the range.
+/// Map a leader position through the calibrated offset. The result wraps on
+/// the same 16-bit circle the camera uses, so home is crossed, not clamped.
 pub fn mapped_target(leader_pan: u16, leader_tilt: u16, pan_offset: i32, tilt_offset: i32) -> (u16, u16) {
-    let pan = (leader_pan as i32 + pan_offset).clamp(0, POS_MAX) as u16;
-    let tilt = (leader_tilt as i32 + tilt_offset).clamp(0, POS_MAX) as u16;
-    (pan, tilt)
+    let pan = (leader_pan as i32 + pan_offset).rem_euclid(0x1_0000);
+    let tilt = (leader_tilt as i32 + tilt_offset).rem_euclid(0x1_0000);
+    (pan as u16, tilt as u16)
 }
 
 pub fn needs_move(last: Option<(u16, u16)>, target: (u16, u16)) -> bool {
     match last {
         None => true,
         Some((p, t)) => {
-            (p as i32 - target.0 as i32).abs() > DEADBAND
-                || (t as i32 - target.1 as i32).abs() > DEADBAND
+            (shortest_delta(p, target.0)).abs() > DEADBAND
+                || (shortest_delta(t, target.1)).abs() > DEADBAND
         }
     }
 }
@@ -154,11 +221,12 @@ pub fn start(
     spec: FollowSpec,
     gen: u64,
     current: Arc<AtomicU64>,
-    slot: Arc<Mutex<Option<FollowEvent>>>,
+    slot: Arc<Mutex<Vec<FollowEvent>>>,
     wake: Option<rune::Waker>,
 ) {
     std::thread::spawn(move || {
         let mut last_sent: Option<(u16, u16)> = None;
+        let mut last_sent_at: Option<std::time::Instant> = None;
         let mut last_note = String::new();
         let mut last_leader_error = String::new();
         let mut last_follower_error = String::new();
@@ -168,10 +236,17 @@ pub fn start(
                     if current.load(Ordering::SeqCst) != gen {
                         break;
                     }
-                    last_leader_error.clear();
+                    if !last_leader_error.is_empty() {
+                        last_leader_error.clear();
+                        last_note.clear();
+                    }
                     let target =
                         mapped_target(lp, lt, spec.pan_offset, spec.tilt_offset);
-                    if needs_move(last_sent, target) {
+                    let mut tick_error = false;
+                    let stale = last_sent_at
+                        .map(|at| at.elapsed() >= RESEND)
+                        .unwrap_or(true);
+                    if needs_move(last_sent, target) || stale {
                         let (protocol, port) = proto(&spec.follower);
                         let payload = visca::pan_tilt_absolute(
                             spec.follower.address,
@@ -183,22 +258,36 @@ pub fn start(
                         if current.load(Ordering::SeqCst) != gen {
                             break;
                         }
-                        if let Err(error) = visca::send_only(&spec.follower.ip, port, protocol, &payload)
-                        {
-                            let note = format!("{}: {}", spec.follower.name, error);
-                            if note != last_follower_error {
-                                last_follower_error = note.clone();
-                                emit(&slot, &wake, FollowEvent::Error(note));
+                        match visca::send_only(&spec.follower.ip, port, protocol, &payload) {
+                            Ok(()) => {
+                                last_sent = Some(target);
+                                last_sent_at = Some(std::time::Instant::now());
+                                last_follower_error.clear();
                             }
-                        } else {
-                            last_sent = Some(target);
-                            last_follower_error.clear();
+                            Err(error) => {
+                                let note = format!("{}: {}", spec.follower.name, error);
+                                tick_error = true;
+                                if note != last_follower_error {
+                                    last_follower_error = note.clone();
+                                    last_note.clear();
+                                    if current.load(Ordering::SeqCst) == gen {
+                                        emit(&slot, &wake, FollowEvent::Error { gen, msg: note });
+                                    }
+                                }
+                            }
                         }
                     }
-                    let note = format!("Following — {} drives {}", spec.leader.name, spec.follower.name);
+                    if current.load(Ordering::SeqCst) != gen {
+                        break;
+                    }
+                    if tick_error {
+                        sleep_while(gen, &current, TICK);
+                        continue;
+                    }
+                    let note = following_note(&spec.leader.name, &spec.follower.name);
                     if note != last_note {
                         last_note = note.clone();
-                        emit(&slot, &wake, FollowEvent::Status(note));
+                        emit(&slot, &wake, FollowEvent::Status { gen, msg: note });
                     }
                 }
                 Err(error) => {
@@ -208,7 +297,8 @@ pub fn start(
                     let note = format!("{}: {}", spec.leader.name, error);
                     if note != last_leader_error {
                         last_leader_error = note.clone();
-                        emit(&slot, &wake, FollowEvent::Error(note));
+                        last_note.clear();
+                        emit(&slot, &wake, FollowEvent::Error { gen, msg: note });
                     }
                 }
             }
@@ -219,12 +309,12 @@ pub fn start(
 
 #[cfg(not(target_arch = "wasm32"))]
 fn emit(
-    slot: &Arc<Mutex<Option<FollowEvent>>>,
+    slot: &Arc<Mutex<Vec<FollowEvent>>>,
     wake: &Option<rune::Waker>,
     event: FollowEvent,
 ) {
     if let Ok(mut s) = slot.lock() {
-        *s = Some(event);
+        s.push(event);
     }
     if let Some(w) = wake {
         w();
@@ -248,21 +338,47 @@ mod tests {
     use super::*;
 
     #[test]
-    fn offset_maps_and_clamps() {
+    fn offset_maps_and_wraps_at_home() {
         assert_eq!(mapped_target(1000, 2000, 100, -500), (1100, 1500));
-        assert_eq!(mapped_target(10, 10, -100, -100), (0, 0));
-        assert_eq!(mapped_target(0xFFF0, 0xFFF0, 100, 100), (0xFFFF, 0xFFFF));
+        // crossing the zero/home point wraps on the 16-bit circle
+        assert_eq!(mapped_target(10, 10, -100, -100), (0xFFA6, 0xFFA6));
+        assert_eq!(mapped_target(0xFFF0, 0xFFF0, 100, 100), (0x0054, 0x0054));
     }
 
     #[test]
-    fn calibration_offset_is_follower_minus_leader() {
+    fn calibration_offset_is_shortest_signed_delta() {
         assert_eq!(offset_from((1000, 2000), (900, 2100)), (-100, 100));
+        assert_eq!(offset_from((0x0010, 0x0010), (0xFFF0, 0xFFF0)), (-32, -32));
     }
 
     #[test]
     fn small_aim_changes_are_ignored() {
         assert!(needs_move(None, (100, 100)));
-        assert!(!needs_move(Some((100, 100)), (102, 98)));
-        assert!(needs_move(Some((100, 100)), (104, 100)));
+        assert!(!needs_move(Some((100, 100)), (120, 80)));
+        assert!(needs_move(Some((100, 100)), (121, 100)));
+        assert!(needs_move(Some((0x0000, 100)), (0xFFE0, 100)));
+    }
+
+    #[test]
+    fn saved_offsets_round_trip_atomically() {
+        let dir = std::env::temp_dir().join(format!(
+            "fomako-follow-test-{}",
+            std::process::id()
+        ));
+        std::fs::create_dir_all(&dir).unwrap();
+        let path = dir.join("fomako-follow.json");
+        let saved = FollowSaved {
+            leader_ip: "192.168.5.163".into(),
+            follower_ip: "192.168.5.164".into(),
+            pan_offset: -32,
+            tilt_offset: 100,
+        };
+        let text = serde_json::to_string_pretty(&saved).unwrap();
+        write_one(&path, &text).unwrap();
+        let loaded = load_from(&path).unwrap();
+        assert_eq!(loaded.pan_offset, -32);
+        assert_eq!(loaded.tilt_offset, 100);
+        assert!(write_one(&dir, &text).is_err(), "directory is not a file target");
+        let _ = std::fs::remove_dir_all(&dir);
     }
 }
