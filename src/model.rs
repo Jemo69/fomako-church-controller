@@ -416,7 +416,7 @@ impl App {
         }
         if s.follow_ready {
             s.follow_status = format!(
-                "Ready — saved offset pan {:+#}, tilt {:+#} steps. Start when ready.",
+                "Ready — saved offset pan {:+}, tilt {:+} steps. Start when ready.",
                 s.follow_pan_offset, s.follow_tilt_offset
             );
         }
@@ -598,7 +598,7 @@ impl App {
                     let saved = self.save_follow_offsets();
                     self.follow_status = match saved {
                         Ok(()) => format!(
-                            "Calibrated — offset pan {:+#}, tilt {:+#} steps. Start when ready.",
+                            "Calibrated — offset pan {:+}, tilt {:+} steps. Start when ready.",
                             pan, tilt
                         ),
                         Err(error) => format!(

@@ -55,7 +55,7 @@ This app therefore mirrors the leader's aim instead of sharing the subject:
 
 1. Turn tracking ON for the leader with the Control page card, its remote (`F2`), or its web page.
 2. Turn the follower's own AI tracking **off**, or the two controllers fight.
-3. Point both cameras at the same landmark and press **Calibrate** — the app reads both pan/tilt positions and stores the offset (`fomako-follow.json`, working directory first, then beside the app).
+3. Point both cameras at the same landmark and hold both still. Press **Calibrate** — the app samples both pan/tilt positions twice, rejects a reading if either camera moved, and stores the offset (`fomako-follow.json`, working directory first, then beside the app).
 4. Press **Start** on the Control page. The app polls the leader's `8x 09 06 12 FF` position about 8×/s while it answers (slower when it does not) and sends the follower `8x 01 06 02 …`.
 
 Use the **Pan/Tilt arrow** nudge buttons (100-count steps ≈ 0.5°) to fine-tune the framing without moving the leader. Works best with both cameras near each other, a distant subject, and similar zoom. Parallax grows with baseline and zoom, and the follower only sees what the leader sees — it does not re-acquire the subject after a cut or a complete occlusion.

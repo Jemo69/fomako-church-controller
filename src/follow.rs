@@ -24,8 +24,6 @@ use crate::model::CameraConfig;
 #[cfg(not(target_arch = "wasm32"))]
 use crate::visca::{self, Protocol};
 
-/// Position values are 16-bit VISCA counts (`0Y 0Y 0Y 0Y`).
-pub const POS_MAX: i32 = 0xFFFF;
 /// Shortest signed delta never exceeds half the circle.
 pub const OFFSET_MAX: i32 = 0x7FFF;
 /// ~0.1° at the documented ~0.5° per 100 counts; the camera's own aim accuracy.
@@ -34,7 +32,7 @@ const RESEND: Duration = Duration::from_secs(2);
 #[cfg(not(target_arch = "wasm32"))]
 const TICK: Duration = Duration::from_millis(120);
 
-#[derive(Clone, Debug)]
+#[derive(Debug)]
 pub enum FollowEvent {
     Status { gen: u64, msg: String },
     Error { gen: u64, msg: String },
@@ -56,11 +54,12 @@ pub struct FollowSaved {
 
 fn paths() -> Vec<std::path::PathBuf> {
     let cwd = std::path::PathBuf::from("fomako-follow.json");
+    let cwd_abs = std::env::current_dir().ok().map(|d| d.join("fomako-follow.json"));
     let exe = std::env::current_exe()
         .ok()
         .and_then(|p| p.parent().map(|d| d.join("fomako-follow.json")));
     match exe {
-        Some(exe) if exe != cwd => vec![cwd, exe],
+        Some(exe) if cwd_abs.as_ref() != Some(&exe) => vec![cwd, exe],
         _ => vec![cwd],
     }
 }
@@ -77,10 +76,12 @@ pub fn load_saved() -> Option<FollowSaved> {
 fn write_one(path: &std::path::Path, text: &str) -> Result<(), String> {
     let tmp = path.with_extension("json.tmp");
     std::fs::write(&tmp, text).map_err(|e| format!("{}: {e}", tmp.display()))?;
-    // Windows rename refuses to replace; remove the old copy first.
-    if path.exists() {
-        let _ = std::fs::remove_file(path);
+    if std::fs::rename(&tmp, path).is_ok() {
+        return Ok(());
     }
+    // Very defensive fallback; the first rename is atomic and replaces on
+    // both Unix and Windows.
+    let _ = std::fs::remove_file(path);
     std::fs::rename(&tmp, path).map_err(|e| format!("{}: {e}", path.display()))
 }
 
@@ -179,10 +180,13 @@ pub fn calibrate(leader: &CameraConfig, follower: &CameraConfig) -> Result<(i32,
     let first = query_pos(leader)?;
     let follower_pos = query_pos(follower)?;
     let second = query_pos(leader)?;
+    let follower_second = query_pos(follower)?;
     if shortest_delta(first.0, second.0).abs() > DEADBAND
         || shortest_delta(first.1, second.1).abs() > DEADBAND
+        || shortest_delta(follower_pos.0, follower_second.0).abs() > DEADBAND
+        || shortest_delta(follower_pos.1, follower_second.1).abs() > DEADBAND
     {
-        return Err("a camera moved during calibration — hold still and retry".to_string());
+        return Err("a camera moved during calibration — hold both still and retry".to_string());
     }
     Ok(offset_from(first, follower_pos))
 }
@@ -205,7 +209,7 @@ pub fn needs_move(last: Option<(u16, u16)>, target: (u16, u16)) -> bool {
     }
 }
 
-#[derive(Clone, Debug)]
+#[derive(Debug)]
 pub struct FollowSpec {
     pub leader: CameraConfig,
     pub follower: CameraConfig,
@@ -360,13 +364,40 @@ mod tests {
     }
 
     #[test]
+    fn mapped_target_inverts_the_calibrated_offset() {
+        for leader in [(1000u16, 2000u16), (0x0005, 0x8000), (0xFFF0, 0x0010)] {
+            for follower in [(900u16, 2100u16), (0x0010, 0x7FF0), (0x1234, 0xABCD)] {
+                let offset = offset_from(leader, follower);
+                assert_eq!(mapped_target(leader.0, leader.1, offset.0, offset.1), follower);
+            }
+        }
+    }
+
+    #[test]
+    fn save_pair_rejects_the_same_camera() {
+        let cam = |ip: &str| CameraConfig {
+            name: ip.into(),
+            ip: ip.into(),
+            address: 1,
+            protocol: crate::model::ProtoSer::SonyUdp,
+            username: "admin".into(),
+            password: "admin".into(),
+        };
+        let cameras = vec![cam("192.168.5.163"), cam("192.168.5.163"), cam("192.168.5.164")];
+        assert!(save_pair(&cameras, 0, 1, 0, 0).is_err());
+        assert!(save_pair(&cameras, 0, 0, 0, 0).is_err());
+    }
+
+    #[test]
     fn saved_offsets_round_trip_atomically() {
         let dir = std::env::temp_dir().join(format!(
             "fomako-follow-test-{}",
             std::process::id()
         ));
         std::fs::create_dir_all(&dir).unwrap();
-        let path = dir.join("fomako-follow.json");
+        let nested = dir.join("nested");
+        std::fs::create_dir_all(&nested).unwrap();
+        let path = nested.join("fomako-follow.json");
         let saved = FollowSaved {
             leader_ip: "192.168.5.163".into(),
             follower_ip: "192.168.5.164".into(),
@@ -378,7 +409,7 @@ mod tests {
         let loaded = load_from(&path).unwrap();
         assert_eq!(loaded.pan_offset, -32);
         assert_eq!(loaded.tilt_offset, 100);
-        assert!(write_one(&dir, &text).is_err(), "directory is not a file target");
+        assert!(write_one(&nested, &text).is_err(), "directory is not a file target");
         let _ = std::fs::remove_dir_all(&dir);
     }
 }

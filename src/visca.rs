@@ -419,10 +419,7 @@ fn send_sony_udp(ip: &str, port: u16, payload: &[u8]) -> Result<String, String> 
 
 fn send_tcp(ip: &str, port: u16, payload: &[u8]) -> Result<String, String> {
     let target = format!("{}:{}", ip, port);
-    let sock_addr: std::net::SocketAddr = {
-        use std::net::ToSocketAddrs;
-        target.to_socket_addrs().map_err(|e| format!("bad address {}: {}", target, e))?.next().ok_or_else(|| format!("bad address {}", target))?
-    };
+    let sock_addr = resolve(&target)?;
     let mut stream = TcpStream::connect_timeout(&sock_addr, Duration::from_millis(1200))
         .map_err(|e| format!("tcp {}: {e}", target))?;
     stream
@@ -489,7 +486,7 @@ pub fn send_only(ip: &str, port: u16, protocol: Protocol, payload: &[u8]) -> Res
             use std::io::{Read, Write};
             let target = format!("{}:{}", ip, port);
             let mut stream = TcpStream::connect_timeout(
-                &target.to_socket_addrs_one()?,
+                &resolve(&target)?,
                 Duration::from_millis(1200),
             )
             .map_err(|e| format!("tcp {}: {e}", target))?;
@@ -555,7 +552,7 @@ pub fn query_blocking(ip: &str, port: u16, protocol: Protocol, payload: &[u8]) -
             use std::io::{Read, Write};
             let target = format!("{}:{}", ip, port);
             let mut stream = TcpStream::connect_timeout(
-                &target.to_socket_addrs_one()?,
+                &resolve(&target)?,
                 Duration::from_millis(1200),
             )
             .map_err(|e| format!("tcp {}: {e}", target))?;
@@ -604,18 +601,13 @@ pub fn query_blocking(ip: &str, port: u16, protocol: Protocol, payload: &[u8]) -
     }
 }
 
-trait ToOneSocketAddr {
-    fn to_socket_addrs_one(&self) -> Result<std::net::SocketAddr, String>;
-}
-
-impl ToOneSocketAddr for str {
-    fn to_socket_addrs_one(&self) -> Result<std::net::SocketAddr, String> {
-        use std::net::ToSocketAddrs;
-        self.to_socket_addrs()
-            .map_err(|e| format!("bad address {}: {}", self, e))?
-            .next()
-            .ok_or_else(|| format!("bad address {}", self))
-    }
+fn resolve(target: &str) -> Result<std::net::SocketAddr, String> {
+    use std::net::ToSocketAddrs;
+    target
+        .to_socket_addrs()
+        .map_err(|e| format!("bad address {}: {}", target, e))?
+        .next()
+        .ok_or_else(|| format!("bad address {}", target))
 }
 
 #[cfg(test)]

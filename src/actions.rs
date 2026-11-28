@@ -614,6 +614,11 @@ fn follow_start(app: &mut App) {
         app.follow_status = "Pick two different cameras (different IPs) first.".to_string();
         return;
     };
+    if app.selected == f && app.track_on {
+        app.follow_status =
+            "Turn the follower's own AI tracking OFF first — it ignores pan/tilt while tracking.".to_string();
+        return;
+    }
     if !app.follow_ready {
         app.follow_status =
             "Calibrate both cameras on one shared landmark first (Start uses the saved offset).".to_string();
@@ -713,7 +718,7 @@ pub fn follow_adjust(app: &mut App, pan_delta: i32, tilt_delta: i32) {
         follow_start(app);
     } else {
         app.follow_status = format!(
-            "Offset pan {:+#}, tilt {:+#} steps — fine-tune while following.",
+            "Offset pan {:+}, tilt {:+} steps — fine-tune while following.",
             app.follow_pan_offset, app.follow_tilt_offset
         );
         if let Some((l, f)) = follow_pair(app) {

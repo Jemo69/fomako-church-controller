@@ -515,7 +515,7 @@ fn follow_card(s: &App, t: rune::tok::Theme, dark: bool, bh: f32) -> El {
     card = card.child(row().w_full().gap(8.0).center_y().flex_wrap()
         .child(calibrate)
         .child(start)
-        .child(text(format!("offset: pan {:+#} · tilt {:+#} steps", s.follow_pan_offset, s.follow_tilt_offset))
+        .child(text(format!("offset: pan {:+} · tilt {:+} steps", s.follow_pan_offset, s.follow_tilt_offset))
             .font(type_::MONO_CAPTION).color(t.text_secondary)));
     card.child(row().w_full().gap(6.0).center_y().flex_wrap()
         .child(text("Nudge offset:".to_owned()).font(type_::LABEL).color(t.text_secondary))
