@@ -168,11 +168,13 @@ pub fn apply_wdr(app: &mut App) {
     let a = app.current().address;
     send(app, "WDR", visca::wdr(a, app.wdr));
 }
-pub fn apply_nr(app: &mut App) {
+pub fn apply_nr2d(app: &mut App) {
     let a = app.current().address;
-    let (d2, d3) = (app.nr2d, app.nr3d);
-    send(app, "NR 2D", visca::nr2d(a, d2));
-    send(app, "NR 3D", visca::nr3d(a, d3));
+    send(app, "NR 2D", visca::nr2d(a, app.nr2d));
+}
+pub fn apply_nr3d(app: &mut App) {
+    let a = app.current().address;
+    send(app, "NR 3D", visca::nr3d(a, app.nr3d));
 }
 pub fn apply_flicker(app: &mut App) {
     let a = app.current().address;
@@ -211,11 +213,13 @@ pub fn apply_awb_sens(app: &mut App) {
     let a = app.current().address;
     send(app, "AWB Sensitivity", visca::awb_sensitivity(a, app.awb_sens));
 }
-pub fn apply_gains(app: &mut App) {
+pub fn apply_r_gain(app: &mut App) {
     let a = app.current().address;
-    let (r, b) = (app.r_gain, app.b_gain);
-    send(app, "R Gain", visca::rgain(a, r));
-    send(app, "B Gain", visca::bgain(a, b));
+    send(app, "R Gain", visca::rgain(a, app.r_gain));
+}
+pub fn apply_b_gain(app: &mut App) {
+    let a = app.current().address;
+    send(app, "B Gain", visca::bgain(a, app.b_gain));
 }
 pub fn apply_flip(app: &mut App) {
     let a = app.current().address;

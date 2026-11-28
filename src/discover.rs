@@ -673,6 +673,38 @@ mod tests {
             .store(true, std::sync::atomic::Ordering::SeqCst);
     }
     #[test]
+    fn image_page_pairs_each_apply_with_its_value() {
+        // The Image page rule: one row per setting, ±/value/Apply together, so
+        // the value you dial is the one Apply sends.
+        let mut rt = crate::model::App::with_test_runtime_sized((1120.0, 4000.0));
+        rt.frame(0.0);
+        rt.update(|s, _| s.page = crate::model::Page::Image);
+        for _ in 0..120 {
+            rt.frame(1.0 / 60.0);
+        }
+        let start = rt.state.shutter;
+        let (px, py) = rt.find("shutter-plus").expect("shutter + present");
+        rt.pointer_down(px, py);
+        rt.pointer_up(px, py);
+        rt.frame(1.0 / 60.0);
+        assert_eq!(rt.state.shutter, start + 1, "+ should raise the shutter value");
+        let (ax, ay) = rt.find("shutter-apply").expect("shutter Apply present");
+        rt.pointer_down(ax, ay);
+        rt.pointer_up(ax, ay);
+        rt.frame(1.0 / 60.0);
+        assert!(
+            rt.state.status.contains("Shutter"),
+            "Apply should send the shutter command, status: {}",
+            rt.state.status
+        );
+        // Every setting keeps its own Apply; the grouped rows are gone.
+        for key in ["iris-apply", "gain-apply", "brightlvl-apply", "nr2d-apply", "nr3d-apply", "rgain-apply", "bgain-apply"] {
+            assert!(rt.find(key).is_some(), "{key} missing on the Image page");
+        }
+        assert!(rt.find("nr-a").is_none(), "combined noise-reduction row should be gone");
+    }
+
+    #[test]
     fn tab_buttons_wire_handlers() {
         let mut rt = crate::model::App::with_test_runtime_sized((1120.0, 4000.0));
         rt.frame(0.0);
