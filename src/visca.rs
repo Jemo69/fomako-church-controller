@@ -693,10 +693,12 @@ mod tests {
             );
             camera.send_to(&reply, source).unwrap();
         });
-        let sent = rx.recv().expect("request");
-        assert_eq!(&sent[8..], &[0x82, 0x09, 0x06, 0x12, 0xFF]);
         let bytes = query_blocking("127.0.0.1", port, Protocol::SonyUdp, &pan_tilt_pos_inq(2))
             .expect("camera 2 reply");
+        let sent = rx
+            .recv_timeout(Duration::from_secs(1))
+            .expect("captured request");
+        assert_eq!(&sent[8..], &[0x82, 0x09, 0x06, 0x12, 0xFF]);
         assert_eq!(parse_pan_tilt_pos(&bytes), Some((0x1234, 0x0ABC)));
     }
 
