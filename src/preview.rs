@@ -921,6 +921,10 @@ fn poll_native(app: &mut App, clock: f64) -> bool {
         if gen == app.preview_gen.load(Ordering::SeqCst) {
             match update {
                 PreviewUpdate::Frame { seq, jpeg, .. } => {
+                    // "Match picture" needs live statistics from the same frames.
+                    if app.look_target.is_some() {
+                        app.look_live = crate::look::analyze_bytes(&jpeg).ok();
+                    }
                     let first = app.preview_image.is_none() && app.preview_pending.is_none();
                     app.preview_frames = seq;
                     app.preview_error.clear();
@@ -937,6 +941,7 @@ fn poll_native(app: &mut App, clock: f64) -> bool {
                 PreviewUpdate::Error { seq, msg, .. } => {
                     app.preview_frames = seq;
                     app.preview_error = msg.clone();
+                    app.look_live = None;
                     app.preview_status =
                         format!("retrying… {}", msg.chars().take(120).collect::<String>());
                     changed = true;

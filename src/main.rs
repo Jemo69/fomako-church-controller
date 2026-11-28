@@ -3,6 +3,7 @@
 
 mod actions;
 mod discover;
+mod look;
 mod model;
 mod preview;
 mod update;
@@ -23,6 +24,7 @@ fn setup(s: &mut App, waker: rune::Waker) {
 fn poll(s: &mut App, clock: f64, tx: &mut Tx) -> bool {
     let mut changed = s.scan_poll(tx);
     changed |= crate::preview::poll(s, clock, tx);
+    changed |= crate::actions::poll_look(s, clock);
     changed |= crate::update::poll(s, clock, tx);
     changed
 }

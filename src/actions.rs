@@ -120,7 +120,6 @@ pub fn power(app: &mut App, on: bool) {
     send(app, if on { "Power ON" } else { "Standby" }, visca::power(a, on));
 }
 pub fn preset(app: &mut App, n: u8, op: u8) {
-    // op: 0 recall, 1 set, 2 clear
     let a = app.current().address;
     let (p, l) = match op {
         1 => (visca::preset_set(a, n), format!("Preset {} Set", n)),
@@ -128,6 +127,53 @@ pub fn preset(app: &mut App, n: u8, op: u8) {
         _ => (visca::preset_recall(a, n), format!("Preset {} Recall", n)),
     };
     send(app, &l, p);
+}
+
+/// Turn the camera's built-in AI tracking on or off (manual §5.2 "Tracking").
+pub fn apply_tracking(app: &mut App) {
+    let a = app.current().address;
+    let on = app.track_on;
+    let area = app.track_area;
+    app.track_status = if on {
+        if area {
+            "Area tracking ON — camera follows movement inside the configured area".to_string()
+        } else {
+            "Real-time tracking ON — camera follows the selected person".to_string()
+        }
+    } else {
+        "Off — camera aims manually".to_string()
+    };
+    send(
+        app,
+        &format!("AI Tracking {}", if on { "ON" } else { "OFF" }),
+        visca::tracking(a, on, area),
+    );
+}
+
+pub fn toggle_tracking(app: &mut App) {
+    app.track_on = !app.track_on;
+    apply_tracking(app);
+}
+
+/// Switch mode and turn tracking on (mode only applies while tracking runs).
+pub fn set_tracking_mode(app: &mut App, area: bool) {
+    app.track_area = area;
+    app.track_on = true;
+    apply_tracking(app);
+}
+
+/// Switch to the next person (F4 on the IR remote; not in the VISCA manual,
+/// so this only stops and restarts tracking, which makes the camera re-acquire).
+pub fn tracking_next_target(app: &mut App) {
+    if !app.track_on {
+        app.set_status("AI Tracking: turn tracking on first".into());
+        return;
+    }
+    let a = app.current().address;
+    let area = app.track_area;
+    send(app, "AI Tracking re-acquire", visca::tracking(a, false, area));
+    send(app, "AI Tracking re-acquire", visca::tracking(a, true, area));
+    app.track_status = "Re-acquiring target…".to_string();
 }
 
 pub fn apply_ae(app: &mut App) {
@@ -347,8 +393,7 @@ pub fn picture_edit_targets(bright: i32, contrast: i32, sat: i32, sharp: i32) ->
 }
 
 /// Apply picture-edit sliders to the real camera image pipeline.
-pub fn apply_picture_edit(app: &mut App) {
-    let (b, c, s, ap) = picture_edit_targets(app.pic_bright, app.pic_contrast, app.pic_sat, app.pic_sharp);
+pub fn apply_picture_edit(app: &mut App) {    let (b, c, s, ap) = picture_edit_targets(app.pic_bright, app.pic_contrast, app.pic_sat, app.pic_sharp);
     app.brightness = b;
     app.contrast = c;
     app.saturation = s;
@@ -358,6 +403,177 @@ pub fn apply_picture_edit(app: &mut App) {
     send(app, &format!("Picture Contrast {}", c), visca::contrast_direct(a, c));
     send(app, &format!("Picture Saturation {}", s), visca::saturation(a, s));
     send(app, &format!("Picture Sharpness {}", ap), visca::aperture(a, ap));
+}
+
+/// Adopt a reference picture: measure its look and remember it as the target.
+pub fn set_look_reference(app: &mut App, label: String, bytes: Vec<u8>) {
+    match crate::look::analyze_bytes(&bytes) {
+        Ok(stats) => {
+            if let Some(cache) = app.preview_cache.as_ref() {
+                app.look_image = Some(cache.load(bytes.clone()));
+            }
+            app.look_bytes = Some(bytes.into());
+            app.look_target = Some(stats);
+            app.look_label = label;
+            app.look_auto = false;
+            app.look_status = format!("Reference — {}", crate::look::describe(&stats));
+            app.set_status(format!("Match picture loaded: {}", app.look_label.clone()));
+        }
+        Err(e) => app.set_status(format!("Match picture: {e}")),
+    }
+}
+
+/// Keep the Picture Edit sliders in step with values the matcher wrote.
+fn sync_picture_sliders(app: &mut App) {
+    app.pic_bright = (((app.brightness as f32 - 7.0) / 0.07).round() as i32).clamp(-100, 100);
+    app.pic_contrast = (((app.contrast as f32 - 7.0) / 0.07).round() as i32).clamp(-100, 100);
+    app.pic_sat = (((app.saturation as f32 - 4.0) / 0.10).round() as i32).clamp(-100, 100);
+    app.pic_sharp = (((app.aperture as f32 - 8.0) / 0.07).round() as i32).clamp(-100, 100);
+}
+
+/// One closed-loop step toward the reference look. True when settings moved.
+pub fn match_look(app: &mut App) -> bool {
+    let Some(target) = app.look_target else {
+        app.set_status("Match picture: load a picture first".into());
+        return false;
+    };
+    let Some(live) = app.look_live else {
+        app.set_status("Match picture: waiting for a live frame".into());
+        return false;
+    };
+    let a = app.current().address;
+    let cur = crate::look::Settings {
+        brightness: app.brightness,
+        contrast: app.contrast,
+        saturation: app.saturation,
+        aperture: app.aperture,
+    };
+    let (next, mut changed) = crate::look::nudge(&target, &live, cur);
+    let mut parts: Vec<String> = Vec::new();
+    if next.brightness != cur.brightness {
+        app.brightness = next.brightness;
+        send(app, "Look brightness", visca::brightness_direct(a, next.brightness));
+        parts.push(format!("brightness {}", next.brightness));
+    }
+    if next.contrast != cur.contrast {
+        app.contrast = next.contrast;
+        send(app, "Look contrast", visca::contrast_direct(a, next.contrast));
+        parts.push(format!("contrast {}", next.contrast));
+    }
+    if next.saturation != cur.saturation {
+        app.saturation = next.saturation;
+        send(app, "Look saturation", visca::saturation(a, next.saturation));
+        parts.push(format!("saturation {}", next.saturation));
+    }
+    if next.aperture != cur.aperture {
+        app.aperture = next.aperture;
+        send(app, "Look sharpness", visca::aperture(a, next.aperture));
+        parts.push(format!("sharpness {}", next.aperture));
+    }
+    if app.look_color {
+        if app.wb_mode != 5 {
+            app.wb_mode = 5;
+            send(app, "Look WB Manual", visca::wb_mode(a, 5));
+            parts.push("WB manual".to_string());
+            changed = true;
+        }
+        let (r, b, colour_changed) = crate::look::nudge_color(target.warmth, live.warmth, app.r_gain, app.b_gain);
+        if colour_changed {
+            app.r_gain = r;
+            app.b_gain = b;
+            send(app, "Look R gain", visca::rgain(a, r));
+            send(app, "Look B gain", visca::bgain(a, b));
+            parts.push(format!("colour R{r} B{b}"));
+            changed = true;
+        }
+    }
+    if changed {
+        sync_picture_sliders(app);
+        app.look_status = format!("Adjusted {}", parts.join(", "));
+        app.set_status(format!("Match picture → {}", app.look_status.clone()));
+    } else {
+        app.look_status = "Live look already matches the reference".to_string();
+    }
+    changed
+}
+
+pub fn toggle_look_auto(app: &mut App) {
+    if app.look_auto {
+        app.look_auto = false;
+        app.set_status("Auto match OFF — camera settings stay where they are".into());
+        return;
+    }
+    if app.look_target.is_none() {
+        app.set_status("Auto match: load a reference picture first".into());
+        return;
+    }
+    app.look_auto = true;
+    app.look_next_at = 0.0;
+    app.set_status("Auto match ON — the app keeps tuning brightness, contrast, saturation and sharpness".into());
+}
+
+/// Load a picture from disk (the looks folder buttons or the path field).
+#[cfg(not(target_arch = "wasm32"))]
+pub fn load_look_file(app: &mut App, path: &str) {
+    let label = std::path::Path::new(path)
+        .file_name()
+        .map(|n| n.to_string_lossy().into_owned())
+        .unwrap_or_else(|| path.to_string());
+    match std::fs::read(path) {
+        Ok(bytes) => set_look_reference(app, label, bytes),
+        Err(e) => app.set_status(format!("Match picture: {path}: {e}")),
+    }
+}
+
+#[cfg(target_arch = "wasm32")]
+pub fn load_look_file(app: &mut App, _path: &str) {
+    app.set_status("Match picture: loading pictures needs the desktop app".into());
+}
+
+#[cfg(not(target_arch = "wasm32"))]
+pub fn refresh_look_files(app: &mut App) {
+    app.look_files = crate::look::list_pictures("looks");
+    app.set_status(format!(
+        "Match picture: {} picture(s) in ./looks{}",
+        app.look_files.len(),
+        if app.look_files.is_empty() {
+            " — drop image files there and press Refresh"
+        } else {
+            ""
+        }
+    ));
+}
+
+#[cfg(target_arch = "wasm32")]
+pub fn refresh_look_files(_app: &mut App) {}
+
+pub fn clear_look(app: &mut App) {
+    app.look_target = None;
+    app.look_live = None;
+    app.look_label.clear();
+    app.look_image = None;
+    app.look_bytes = None;
+    app.look_auto = false;
+    app.look_status = "Load a picture and the app tunes the camera to match it".to_string();
+    app.set_status("Match picture reference cleared (camera unchanged)".into());
+}
+
+/// Called from the app poll: while Auto match is on, take a step every ~2.5 s.
+pub fn poll_look(app: &mut App, clock: f64) -> bool {
+    if !app.look_auto || app.look_target.is_none() || clock < app.look_next_at {
+        return false;
+    }
+    app.look_next_at = clock + 2.5;
+    if app.look_live.is_none() {
+        let msg = "Auto match: waiting for a live frame".to_string();
+        if app.look_status != msg {
+            app.look_status = msg;
+            return true;
+        }
+        return false;
+    }
+    match_look(app);
+    true
 }
 
 #[cfg(target_arch = "wasm32")]
@@ -390,5 +606,21 @@ mod tests {
     fn picture_edit_clamps_to_camera_ranges() {
         assert_eq!(picture_edit_targets(-100, -100, -100, -100), (0, 0, 0, 1));
         assert_eq!(picture_edit_targets(100, 100, 100, 100), (14, 14, 14, 15));
+    }
+
+    #[test]
+    fn reference_picture_is_measured_and_disarms_auto_match() {
+        let mut app = crate::model::App::new();
+        let img = image::RgbImage::from_fn(24, 24, |_, _| image::Rgb([12, 200, 40]));
+        let mut bytes = std::io::Cursor::new(Vec::new());
+        image::DynamicImage::ImageRgb8(img)
+            .write_to(&mut bytes, image::ImageFormat::Png)
+            .expect("encode png");
+        super::set_look_reference(&mut app, "green.png".into(), bytes.into_inner());
+        let stats = app.look_target.expect("reference measured");
+        assert!(stats.saturation > 0.5, "{}", stats.saturation);
+        assert!(stats.warmth < 0.0);
+        assert!(!app.look_auto, "a new reference does not start auto match");
+        assert_eq!(app.look_label, "green.png");
     }
 }

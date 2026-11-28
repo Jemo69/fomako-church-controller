@@ -4,6 +4,7 @@ use rune::tok::{self, type_};
 use rune::{Cx, El, ScrollSpec, TextStyle, col, el, row, text, text_input};
 
 use crate::actions;
+use crate::look;
 use crate::model::{App, Page};
 use crate::update::{self, UpdatePhase};
 use crate::visca::PtDir;
@@ -234,6 +235,15 @@ fn topbar(s: &App, t: rune::tok::Theme, dark: bool, touch: bool, _cx: &mut Cx<Ap
         }
         _ => {}
     }
+    // Tracking runs in the camera and ignores PTZ: keep that visible everywhere.
+    if s.track_on {
+        bar = bar.child(btn_labeled(
+            "● Tracking",
+            "AI tracking is on — open Control to turn it off",
+            "track-badge", t, 100.0, bh,
+            |s: &mut App| s.page = Page::Control,
+        ));
+    }
     bar.child(btn_labeled(
         if dark { "☾ Dark" } else { "☀ Light" },
         if dark { "Switch to light theme" } else { "Switch to dark theme" },
@@ -312,6 +322,7 @@ fn control_page(s: &App, t: rune::tok::Theme, dark: bool, touch: bool) -> El {
     col().key("control").w_full().px(16.0).py(14.0).gap(14.0)
         .child(camera_switcher(s, t, touch))
         .child(preview_pane(s, t, touch))
+        .child(tracking_card(s, t, dark, touch))
         .child(row().w_full().gap(14.0).flex_wrap()
             .child(ptz_pad(t, touch))
             .child(col().gap(10.0).grow(1.0).min_w(240.0)
@@ -359,6 +370,63 @@ fn control_page(s: &App, t: rune::tok::Theme, dark: bool, touch: bool) -> El {
         .child(hint_card(t, "Tip: click an arrow to jog. Press Stop to halt. Home returns to center. Preset 0 is the power-on position if saved. Pan 40°/s, Tilt 30°/s, ±0.1° accuracy."))
 }
 
+/// Camera-side AI tracking switch (manual §5.2 "Tracking"). The camera does the
+/// following itself; while it is on, pan/tilt commands are ignored.
+fn tracking_card(s: &App, t: rune::tok::Theme, dark: bool, touch: bool) -> El {
+    let bh = if touch { 42.0 } else { 30.0 };
+    let ch = if touch { 40.0 } else { 28.0 };
+    let power = if s.track_on {
+        btn_labeled(
+            "Tracking OFF",
+            "Turn the camera's AI auto tracking off",
+            "track-off", t, 116.0, bh,
+            actions::toggle_tracking,
+        )
+    } else {
+        accent_btn_labeled(
+            "Tracking ON",
+            "Turn the camera's AI auto tracking on",
+            "track-on", dark, 116.0, bh,
+            actions::toggle_tracking,
+        )
+    };
+    let mode = |label: &str, a11y: &str, key: &str, area: bool| {
+        let on = s.track_area == area && s.track_on;
+        el().key(key.to_owned()).h(ch).px(12.0).center().radius(ch * 0.5)
+            .fill(if on { tok::accent(0, dark) } else { t.bg })
+            .border(1.0, if on { t.card_border } else { t.bg })
+            .hover(t.hover).press(t.press).focusable(true)
+            .role("radio").checked(on).label(a11y.to_owned())
+            .on_press(move |s: &mut App| actions::set_tracking_mode(s, area))
+            .child(text(label.to_owned()).font(type_::LABEL)
+                .color(if on { rune::Color::WHITE } else { t.text }).a11y_hidden())
+    };
+    col().key("tracking").w_full().gap(8.0).padding(12.0).radius(8.0)
+        .fill(t.card).border(1.0, t.card_border)
+        .child(row().w_full().gap(8.0).center_y().flex_wrap()
+            .child(section_title(t, "AI auto tracking"))
+            .child(text(s.track_status.clone()).font(type_::LABEL).color(t.text_secondary)
+                .grow(1.0).min_w(140.0).wrap())
+            .child(power))
+        .child(row().w_full().gap(8.0).center_y().flex_wrap()
+            .child(text("Mode:".to_owned()).font(type_::BODY).color(t.text))
+            .child(mode("Real-time", "Follow one person in real time", "track-realtime", false))
+            .child(mode("Area", "Follow movement inside the configured area", "track-area", true))
+            .child(btn_labeled(
+                "Re-acquire",
+                "Stop and restart tracking so the camera picks a target again",
+                "track-next", t, 100.0, ch,
+                actions::tracking_next_target,
+            )))
+        .child(text(
+            "Tracking runs inside the camera, so the PTZ pad is ignored while it is on. \
+             Real-time follows one person: press F4 on the IR remote (or click their box in the camera web page) to switch. \
+             Area mode needs at least two areas saved in the camera web page first. \
+             Only AI-tracking models answer this command — on older cameras it is ignored (Cameras → Test shows the reply)."
+                .to_owned())
+            .w_full().wrap().font(type_::LABEL).color(t.text_secondary))
+}
+
 fn camera_switcher(s: &App, t: rune::tok::Theme, touch: bool) -> El {
     let ch = if touch { 40.0 } else { 30.0 };
     let mut r = row().key("cams").w_full().min_h(40.0).py(4.0).gap(8.0).center_y().flex_wrap();
@@ -372,7 +440,7 @@ fn camera_switcher(s: &App, t: rune::tok::Theme, touch: bool) -> El {
                 .border(1.0, t.card_border)
                 .hover(t.hover).press(t.press).focusable(true)
                 .role("tab").checked(on).label(label.clone())
-                .on_press(move |s: &mut App| { s.selected = i; s.set_status(format!("Selected {}", s.current().name.clone())); })
+                .on_press(move |s: &mut App| { s.select_camera(i); s.set_status(format!("Selected {}", s.current().name.clone())); })
                 .child(text(if on { format!("● {}", cam.name) } else { cam.name.clone() })
                     .font(type_::BODY)
                     .color(if on { rune::Color::WHITE } else { t.text })
@@ -511,6 +579,7 @@ fn picture_page(s: &App, t: rune::tok::Theme, dark: bool, touch: bool) -> El {
         .child(text("Picture Edit — preview, then Apply to Camera".to_owned()).w_full().wrap().font(type_::TITLE).color(t.text))
         .child(text("Tune the look like a photo editor. The preview below simulates the change live. Apply sends Brightness/Contrast/Saturation/Sharpness (VISCA A1/A2/49/42) to the selected camera.".to_owned()).w_full().wrap().font(type_::LABEL).color(t.text_secondary))
         .child(preview_pane(s, t, touch))
+        .child(look_card(s, t, dark, touch))
         .child(col().w_full().gap(16.0)
             .child(col().w_full().gap(8.0)
                 .child(section_title(t, "Adjust"))
@@ -534,6 +603,135 @@ fn picture_page(s: &App, t: rune::tok::Theme, dark: bool, touch: bool) -> El {
                     .w_full().wrap().font(type_::LABEL).color(t.text_secondary))
             )
         )
+}
+
+/// "Match a picture": a reference image drives image settings only
+/// (brightness/contrast/saturation/sharpness, optional R/B gain). No PTZ.
+fn look_card(s: &App, t: rune::tok::Theme, dark: bool, touch: bool) -> El {
+    let bh = if touch { 42.0 } else { 30.0 };
+    let has_ref = s.look_target.is_some();
+    let thumb = s.look_image.as_ref().and_then(|img| img.size().map(|_| img));
+    let mut thumb_el = el().key("look-thumb").w(200.0).h(126.0).center().radius(8.0)
+        .fill(t.bg).border(1.0, t.card_border);
+    if let Some(img) = thumb {
+        thumb_el = thumb_el.child(
+            el().w_full().h_full().radius(8.0)
+                .child(el().key("look-img").w_full().h_full().pixels(img.pixels())),
+        );
+    } else {
+        thumb_el = thumb_el.child(text("No picture".to_owned()).font(type_::LABEL).color(t.text_secondary));
+    }
+    let target_line = match s.look_target {
+        Some(st) => format!("Reference — {}", look::describe(&st)),
+        None => "Choose a picture: the app measures its look and tunes the camera to match.".to_string(),
+    };
+    let live_line = match s.look_live {
+        Some(st) => format!("Live — {}", look::describe(&st)),
+        None => "Live look: waiting for the camera preview".to_string(),
+    };
+    // Picture chooser: any path, plus one-tap buttons for everything in ./looks.
+    let mut files = row().w_full().gap(6.0).center_y().flex_wrap()
+        .child(text("Pictures:".to_owned()).font(type_::LABEL).color(t.text_secondary));
+    if s.look_files.is_empty() {
+        files = files.child(text("none — drop images into ./looks, then Refresh".to_owned())
+            .font(type_::LABEL).color(t.text_secondary));
+    }
+    for (i, path) in s.look_files.iter().take(8).enumerate() {
+        let p = path.clone();
+        let label = std::path::Path::new(path)
+            .file_name()
+            .map(|n| n.to_string_lossy().into_owned())
+            .unwrap_or_else(|| path.clone());
+        let short: String = label.chars().take(22).collect();
+        files = files.child(btn_labeled(
+            &short,
+            &format!("Use picture {}", label),
+            &format!("look-file-{}", i), t, 132.0, bh,
+            move |s: &mut App| actions::load_look_file(s, &p),
+        ));
+    }
+    #[cfg(not(target_arch = "wasm32"))]
+    let files = files.child(btn_labeled(
+        "Refresh",
+        "Rescan the looks folder",
+        "look-refresh", t, 84.0, bh,
+        actions::refresh_look_files,
+    ));
+    let auto = if s.look_auto {
+        btn_labeled(
+            "Auto match: ON",
+            "Stop continuously matching the reference look",
+            "look-auto", t, 150.0, bh,
+            actions::toggle_look_auto,
+        )
+    } else {
+        accent_btn_labeled(
+            "Auto match: OFF",
+            "Continuously tune the camera toward the reference look",
+            "look-auto", dark, 150.0, bh,
+            actions::toggle_look_auto,
+        )
+    };
+    let colour = if s.look_color {
+        btn_labeled(
+            "Colour: ON",
+            "Stop matching colour with R/B gain",
+            "look-colour", t, 116.0, bh,
+            |s: &mut App| { s.look_color = false; s.set_status("Match picture: colour matching off".into()); },
+        )
+    } else {
+        btn_labeled(
+            "Colour: OFF",
+            "Match colour too (switches WB to Manual and trims R/B gain)",
+            "look-colour", t, 116.0, bh,
+            |s: &mut App| { s.look_color = true; s.set_status("Match picture: colour matching on — WB will go Manual".into()); },
+        )
+    };
+    let mut card = col().key("look").w_full().gap(10.0).padding(12.0).radius(8.0)
+        .fill(t.card).border(1.0, t.card_border)
+        .child(section_title(t, "Match a picture — image settings only (no pan/tilt)"))
+        .child(row().w_full().gap(12.0).center_y().flex_wrap()
+            .child(thumb_el)
+            .child(col().gap(4.0).grow(1.0).min_w(220.0)
+                .child(text(target_line).w_full().wrap().font(type_::LABEL)
+                    .color(if has_ref { t.text } else { t.text_secondary }))
+                .child(text(live_line).w_full().wrap().font(type_::LABEL).color(t.text_secondary))
+                .child(text(s.look_status.clone()).w_full().wrap().font(type_::LABEL).color(t.text_secondary))))
+        .child(files)
+        .child(row().w_full().gap(8.0).center_y().flex_wrap()
+            .child(accent_btn_labeled(
+                "Match now",
+                "Measure the live frame and adjust the camera once",
+                "look-match", dark, 110.0, bh,
+                |s: &mut App| { actions::match_look(s); },
+            ))
+            .child(auto)
+            .child(colour)
+            .child(btn_labeled("Clear", "Forget the reference picture", "look-clear", t, 76.0, bh, actions::clear_look)));
+    if cfg!(not(target_arch = "wasm32")) {
+        card = card.child(row().w_full().gap(8.0).center_y().flex_wrap()
+            .child(text("or path:".to_owned()).font(type_::LABEL).color(t.text_secondary))
+            .child(text_input(&s.look_path, field_style()).single_line().key("look-path")
+                .grow(1.0).min_w(160.0).max_w(360.0)
+                .placeholder("/home/booth/match.jpg".to_owned(), t.text_secondary)
+                .on_edit(|s: &mut App| &mut s.look_path))
+            .child(btn_labeled("Load", "Load the picture at that path", "look-load", t, 72.0, bh, |s: &mut App| {
+                let path = s.look_path.text.trim().to_string();
+                if path.is_empty() {
+                    s.set_status("Match picture: type a path or use a picture button above".into());
+                    return;
+                }
+                let label = std::path::Path::new(&path)
+                    .file_name()
+                    .map(|n| n.to_string_lossy().into_owned())
+                    .unwrap_or_else(|| path.clone());
+                match std::fs::read(&path) {
+                    Ok(bytes) => actions::set_look_reference(s, label, bytes),
+                    Err(e) => s.set_status(format!("Match picture: {path}: {e}")),
+                }
+            })));
+    }
+    card.child(hint_card(t, "This only changes picture settings (VISCA A1/A2/49/42 and optionally WB 43/44) — the camera keeps its position. Auto match re-checks about every 2.5 s while the preview runs. Colour matching switches WB to Manual; set WB back to Auto on the Image page when you're done."))
 }
 
 fn pic_slider(t: rune::tok::Theme, touch: bool, key: &'static str, label: &str, v: i32) -> El {
@@ -644,7 +842,7 @@ fn camera_list(s: &App, t: rune::tok::Theme, touch: bool) -> El {
                 .child(text(format!("{} #{}  {}  {}:{}", if on { "●" } else { "○" }, cam.address, name, ip, cam.protocol.port()))
                     .font(type_::BODY).color(t.text).grow(1.0).min_w(160.0).wrap())
                 .child(btn_labeled("Select", &format!("Select {}", name), &format!("sel-{}", i), t, 74.0, bh, move |s: &mut App| {
-                    s.selected = i;
+                    s.select_camera(i);
                     s.set_status(format!("Selected {}", s.current().name.clone()));
                 }))
                 .child(btn_labeled("Test", &format!("Test {}", name), &format!("test-{}", i), t, 64.0, bh, move |s: &mut App| {
@@ -663,7 +861,7 @@ fn camera_list(s: &App, t: rune::tok::Theme, touch: bool) -> El {
             .child(btn("Remove selected", "cam-remove", t, 148.0, if touch { 42.0 } else { 30.0 }, |s: &mut App| {
                 if s.cameras.len() > 1 {
                     s.cameras.remove(s.selected);
-                    s.selected = 0;
+                    s.select_camera(0);
                     s.save();
                     s.set_status("Camera removed".into());
                 }
@@ -762,7 +960,7 @@ fn scan_section(s: &App, t: rune::tok::Theme, dark: bool, touch: bool) -> El {
                             username: "admin".into(),
                             password: "admin".into(),
                         });
-                        s.selected = s.cameras.len() - 1;
+                        let last = s.cameras.len() - 1; s.select_camera(last);
                         s.save();
                         s.set_status(format!("Added {}", found.ip));
                     }))
@@ -823,7 +1021,7 @@ fn add_form(s: &App, t: rune::tok::Theme, dark: bool, touch: bool) -> El {
                 let username = if username.is_empty() { "admin".into() } else { username };
                 let password = if password.is_empty() { "admin".into() } else { password };
                 s.cameras.push(crate::model::CameraConfig { name, ip, protocol: crate::model::ProtoSer::SonyUdp, address: addr, username, password });
-                s.selected = s.cameras.len() - 1;
+                let last = s.cameras.len() - 1; s.select_camera(last);
                 s.save();
                 s.set_status(format!("Added {}", s.current().name.clone()));
             }))
@@ -837,7 +1035,7 @@ fn add_form(s: &App, t: rune::tok::Theme, dark: bool, touch: bool) -> El {
                 let username = if username.is_empty() { "admin".into() } else { username };
                 let password = if password.is_empty() { "admin".into() } else { password };
                 s.cameras.push(crate::model::CameraConfig { name, ip, protocol: crate::model::ProtoSer::Tcp, address: addr, username, password });
-                s.selected = s.cameras.len() - 1;
+                let last = s.cameras.len() - 1; s.select_camera(last);
                 s.save();
                 s.set_status(format!("Added {}", s.current().name.clone()));
             })))
@@ -877,6 +1075,10 @@ fn help_page(s: &App, t: rune::tok::Theme, _dark: bool, touch: bool) -> El {
             "Save framings as presets: frame pulpit → set Preset Sel 1 → Set. Choir → 2 → Set. Wide → 3 → Set. During service tap Recall 1/2/3 (quick grid 0-9 on Control page). Keep Pan 10-16 / Tilt 10-14 for smooth moves."))
         .child(help_card(t, "5. Picture",
             "If the image is dark/washed: Image page → Exposure Full Auto first, then tune Picture Edit → Apply to Camera. White balance Auto indoors; R/B Gain only in Manual WB. Backlight ON for backlit pulpit, WDR 1-3 for windows."))
+        .child(help_card(t, "6. AI auto tracking",
+            "On AI-tracking models (FMK/K600/K630 Gen 3 and similar) the Control page has a Tracking ON/OFF card. It sends 81 0A 01 32 00 00 02 00 FF for real-time tracking, …02 01 FF for area tracking and …03 00 FF to stop. While tracking is on the camera ignores pan/tilt, which is normal: press F4 on the IR remote (or click the person's box in the camera web page) to switch target. Area mode needs at least two areas configured in the web page. Older non-AI models reject the command — Cameras → Test shows the camera's answer."))
+        .child(help_card(t, "7. Match a picture",
+            "Picture Edit → Match a picture loads a reference photo and tunes the camera's image settings to match it: the app measures brightness, contrast, saturation, detail and warmth, then sends VISCA A1 (Brightness), A2 (Contrast), 49 (Saturation) and 42 (Sharpness). Colour matching optionally trims R/B Gain (43/44) in Manual WB. Match now = one pass; Auto match = repeat every ~2.5 s. This never moves the camera — it is separate from AI tracking."))
         .child(help_card(t, "Manual",
             "FoMaKo NDI/SDI/HDMI PTZ User Manual V3.0 (PDF): https://fomako.net/uploads/20230817/fd1bfd181b89ae798bee1f7ed260a7b3.pdf — §§3 remote+menu, 4 network/streaming, 5 VISCA/Pelco lists. IR: * # 7 shows IP, # # # clears presets, * # 6 factory reset."))
         .child(hint_card(t, "Built with Rune (Rust GPU UI, anomalyco/rune). Runs on Windows / macOS / Linux. Config fomako-cameras.json sits beside the app — copy it to every booth PC."))

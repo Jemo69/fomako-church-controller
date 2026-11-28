@@ -12,6 +12,9 @@ pub mod android_jni;
 #[path = "discover.rs"]
 pub mod discover;
 #[cfg(not(target_os = "android"))]
+#[path = "look.rs"]
+pub mod look;
+#[cfg(not(target_os = "android"))]
 #[path = "model.rs"]
 pub mod model;
 #[cfg(not(target_os = "android"))]
@@ -155,6 +158,7 @@ fn poll(s: &mut App, clock: f64, tx: &mut rune::Tx) -> bool {
     let mut changed = s.scan_poll(tx);
     changed |= actions::poll_action_replies(s);
     changed |= preview::poll(s, clock, tx);
+    changed |= actions::poll_look(s, clock);
     changed |= update::poll(s, clock, tx);
     changed
 }
