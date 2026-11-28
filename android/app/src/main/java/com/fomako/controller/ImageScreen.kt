@@ -7,6 +7,7 @@ import androidx.compose.foundation.layout.Row
 import androidx.compose.foundation.layout.defaultMinSize
 import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.padding
+import androidx.compose.foundation.layout.widthIn
 import androidx.compose.foundation.rememberScrollState
 import androidx.compose.material3.Button
 import androidx.compose.material3.Card
@@ -22,6 +23,7 @@ import androidx.compose.ui.semantics.contentDescription
 import androidx.compose.ui.semantics.semantics
 import androidx.compose.ui.text.font.FontFamily
 import androidx.compose.ui.text.font.FontWeight
+import androidx.compose.ui.text.style.TextAlign
 import androidx.compose.ui.unit.dp
 
 @Composable
@@ -48,8 +50,8 @@ fun ImageScreen(state: ControllerState) {
         ModeChips(
             options = listOf("Auto" to 0, "Manual" to 1, "Shutter" to 2, "Iris" to 3, "Bright" to 4),
             selected = state.aeMode,
-            onSelect = { idx ->
-                state.aeMode = idx
+            onSelect = { code ->
+                state.aeMode = code
                 state.sendVisca("Exposure ${state.aeLabel()}", "ae_mode", state.aeByte())
             },
         )
@@ -58,8 +60,8 @@ fun ImageScreen(state: ControllerState) {
             value = state.shutter,
             range = 0..20,
             hint = "Higher number = longer exposure",
-            onMinus = { state.shutter = (state.shutter - 1).coerceAtLeast(0) },
-            onPlus = { state.shutter = (state.shutter + 1).coerceAtMost(20) },
+            code = "VISCA 4A",
+            onValue = { state.shutter = it },
             onApply = { state.sendVisca("Shutter", "shutter", state.shutter) },
         )
         NumberRow(
@@ -67,8 +69,8 @@ fun ImageScreen(state: ControllerState) {
             value = state.iris,
             range = 0..20,
             hint = "Higher number = more light in",
-            onMinus = { state.iris = (state.iris - 1).coerceAtLeast(0) },
-            onPlus = { state.iris = (state.iris + 1).coerceAtMost(20) },
+            code = "VISCA 4B",
+            onValue = { state.iris = it },
             onApply = { state.sendVisca("Iris", "iris", state.iris) },
         )
         NumberRow(
@@ -76,8 +78,8 @@ fun ImageScreen(state: ControllerState) {
             value = state.gainLimit,
             range = 0..15,
             hint = "Caps how much the camera brightens a dark scene",
-            onMinus = { state.gainLimit = (state.gainLimit - 1).coerceAtLeast(0) },
-            onPlus = { state.gainLimit = (state.gainLimit + 1).coerceAtMost(15) },
+            code = "VISCA 2C",
+            onValue = { state.gainLimit = it },
             onApply = { state.sendVisca("Gain Limit", "gain_limit", state.gainLimit) },
         )
         NumberRow(
@@ -85,14 +87,14 @@ fun ImageScreen(state: ControllerState) {
             value = state.brightLvl,
             range = 0..23,
             hint = "Overall brightness in Bright exposure mode",
-            onMinus = { state.brightLvl = (state.brightLvl - 1).coerceAtLeast(0) },
-            onPlus = { state.brightLvl = (state.brightLvl + 1).coerceAtMost(23) },
+            code = "VISCA 4D",
+            onValue = { state.brightLvl = it },
             onApply = { state.sendVisca("Bright Level", "bright", state.brightLvl) },
         )
     }
 
     // Backlight / WDR / NR
-    SettingsCard("Backlight / WDR / Noise reduction") {
+    SettingsCard("Backlight / WDR / noise reduction") {
         FlagRow(
             label = "Backlight compensation",
             value = if (state.backlight) "On" else "Off",
@@ -105,9 +107,9 @@ fun ImageScreen(state: ControllerState) {
             label = "WDR (wide dynamic range)",
             value = state.wdr,
             range = 0..7,
-            hint = "Brightens shadowed faces when the window behind them is blown out",
-            onMinus = { state.wdr = (state.wdr - 1).coerceAtLeast(0) },
-            onPlus = { state.wdr = (state.wdr + 1).coerceAtMost(7) },
+            hint = "Brightens shadowed faces against a bright window",
+            code = "VISCA 51",
+            onValue = { state.wdr = it },
             onApply = { state.sendVisca("WDR", "wdr", state.wdr) },
         )
         NumberRow(
@@ -115,17 +117,17 @@ fun ImageScreen(state: ControllerState) {
             value = state.nr2d,
             range = 0..7,
             hint = "Removes grain in flat areas",
-            onMinus = { state.nr2d = (state.nr2d - 1).coerceAtLeast(0) },
-            onPlus = { state.nr2d = (state.nr2d + 1).coerceAtMost(7) },
+            code = "VISCA 53",
+            onValue = { state.nr2d = it },
             onApply = { state.sendVisca("NR 2D", "nr2d", state.nr2d) },
         )
         NumberRow(
             label = "Noise reduction (3D)",
             value = state.nr3d,
             range = 0..8,
-            hint = "Removes grain in motion; high values can smear movement",
-            onMinus = { state.nr3d = (state.nr3d - 1).coerceAtLeast(0) },
-            onPlus = { state.nr3d = (state.nr3d + 1).coerceAtMost(8) },
+            hint = "Removes grain in motion; high values smear movement",
+            code = "VISCA 54",
+            onValue = { state.nr3d = it },
             onApply = { state.sendVisca("NR 3D", "nr3d", state.nr3d) },
         )
     }
@@ -149,18 +151,18 @@ fun ImageScreen(state: ControllerState) {
             label = "Red gain",
             value = state.rGain,
             range = 0..255,
-            hint = "Used in Manual white balance to warm or cool the picture",
-            onMinus = { state.rGain = (state.rGain - 1).coerceAtLeast(0) },
-            onPlus = { state.rGain = (state.rGain + 1).coerceAtMost(255) },
+            hint = "Fine-tunes colour in Manual white balance",
+            code = "VISCA 43",
+            onValue = { state.rGain = it },
             onApply = { state.sendVisca("R Gain", "rgain", state.rGain) },
         )
         NumberRow(
             label = "Blue gain",
             value = state.bGain,
             range = 0..255,
-            hint = "Used in Manual white balance to warm or cool the picture",
-            onMinus = { state.bGain = (state.bGain - 1).coerceAtLeast(0) },
-            onPlus = { state.bGain = (state.bGain + 1).coerceAtMost(255) },
+            hint = "Fine-tunes colour in Manual white balance",
+            code = "VISCA 44",
+            onValue = { state.bGain = it },
             onApply = { state.sendVisca("B Gain", "bgain", state.bGain) },
         )
     }
@@ -171,9 +173,9 @@ fun ImageScreen(state: ControllerState) {
             label = "Brightness",
             value = state.brightness,
             range = 0..14,
-            hint = "Same as the Brightness slider on the Picture tab",
-            onMinus = { state.brightness = (state.brightness - 1).coerceAtLeast(0) },
-            onPlus = { state.brightness = (state.brightness + 1).coerceAtMost(14) },
+            hint = "Same as the Picture tab brightness slider",
+            code = "VISCA A1",
+            onValue = { state.brightness = it },
             onApply = { state.sendVisca("Brightness", "brightness", state.brightness) },
         )
         NumberRow(
@@ -181,8 +183,8 @@ fun ImageScreen(state: ControllerState) {
             value = state.contrast,
             range = 0..14,
             hint = "Higher number = punchier picture",
-            onMinus = { state.contrast = (state.contrast - 1).coerceAtLeast(0) },
-            onPlus = { state.contrast = (state.contrast + 1).coerceAtMost(14) },
+            code = "VISCA A2",
+            onValue = { state.contrast = it },
             onApply = { state.sendVisca("Contrast", "contrast", state.contrast) },
         )
         NumberRow(
@@ -190,8 +192,8 @@ fun ImageScreen(state: ControllerState) {
             value = state.saturation,
             range = 0..14,
             hint = "0 = black and white, higher = more vivid colour",
-            onMinus = { state.saturation = (state.saturation - 1).coerceAtLeast(0) },
-            onPlus = { state.saturation = (state.saturation + 1).coerceAtMost(14) },
+            code = "VISCA 49",
+            onValue = { state.saturation = it },
             onApply = { state.sendVisca("Saturation", "saturation", state.saturation) },
         )
         NumberRow(
@@ -199,17 +201,17 @@ fun ImageScreen(state: ControllerState) {
             value = state.aperture,
             range = 0..15,
             hint = "Detail enhancement; too high looks crunchy",
-            onMinus = { state.aperture = (state.aperture - 1).coerceAtLeast(0) },
-            onPlus = { state.aperture = (state.aperture + 1).coerceAtMost(15) },
+            code = "VISCA 42",
+            onValue = { state.aperture = it },
             onApply = { state.sendVisca("Sharpness", "aperture", state.aperture) },
         )
         NumberRow(
             label = "Gamma",
             value = state.gamma,
             range = 0..4,
-            hint = "Changes mid-tone contrast without clipping highlights",
-            onMinus = { state.gamma = (state.gamma - 1).coerceAtLeast(0) },
-            onPlus = { state.gamma = (state.gamma + 1).coerceAtMost(4) },
+            hint = "Mid-tone contrast without clipping highlights",
+            code = "VISCA 5B",
+            onValue = { state.gamma = it },
             onApply = { state.sendVisca("Gamma", "gamma", state.gamma) },
         )
         FlagRow(
@@ -285,8 +287,8 @@ private fun ModeChips(
 
 /**
  * One setting the user can dial and send: a readable name and explanation,
- * a plain number (no hex), and the Apply button right under the value so it is
- * obvious the two belong together.
+ * a plain number (no hex) between − and +, and the Apply button in the same
+ * group so it is obvious which value it sends.
  */
 @Composable
 private fun NumberRow(
@@ -294,48 +296,42 @@ private fun NumberRow(
     value: Int,
     range: IntRange,
     hint: String,
-    onMinus: () -> Unit,
-    onPlus: () -> Unit,
+    code: String,
+    onValue: (Int) -> Unit,
     onApply: () -> Unit,
 ) {
     Column(
         modifier = Modifier.fillMaxWidth(),
         verticalArrangement = Arrangement.spacedBy(6.dp)
     ) {
-        Row(
-            modifier = Modifier.fillMaxWidth(),
-            verticalAlignment = Alignment.CenterVertically,
-            horizontalArrangement = Arrangement.spacedBy(8.dp)
-        ) {
-            Column(modifier = Modifier.weight(1f)) {
-                Text(label, style = MaterialTheme.typography.bodyLarge)
-                Text(
-                    text = "$hint · range ${range.first}–${range.last}",
-                    style = MaterialTheme.typography.labelSmall,
-                    color = MaterialTheme.colorScheme.onSurfaceVariant,
-                )
-            }
-            Text(
-                text = "$value",
-                style = MaterialTheme.typography.titleMedium,
-                fontFamily = FontFamily.Monospace,
-                fontWeight = FontWeight.SemiBold,
-            )
-        }
+        Text(label, style = MaterialTheme.typography.bodyLarge)
+        Text(
+            text = "$hint · range ${range.first}–${range.last} · $code",
+            style = MaterialTheme.typography.labelSmall,
+            color = MaterialTheme.colorScheme.onSurfaceVariant,
+        )
         Row(
             modifier = Modifier.fillMaxWidth(),
             verticalAlignment = Alignment.CenterVertically,
             horizontalArrangement = Arrangement.spacedBy(8.dp)
         ) {
             OutlinedButton(
-                onClick = onMinus,
+                onClick = { onValue((value - 1).coerceAtLeast(range.first)) },
                 enabled = value > range.first,
                 modifier = Modifier
                     .defaultMinSize(minWidth = 56.dp, minHeight = 48.dp)
                     .semantics { contentDescription = "Decrease $label" },
             ) { Text("−") }
+            Text(
+                text = "$value",
+                style = MaterialTheme.typography.titleMedium,
+                fontFamily = FontFamily.Monospace,
+                fontWeight = FontWeight.SemiBold,
+                textAlign = TextAlign.Center,
+                modifier = Modifier.widthIn(min = 40.dp),
+            )
             OutlinedButton(
-                onClick = onPlus,
+                onClick = { onValue((value + 1).coerceAtMost(range.last)) },
                 enabled = value < range.last,
                 modifier = Modifier
                     .defaultMinSize(minWidth = 56.dp, minHeight = 48.dp)
