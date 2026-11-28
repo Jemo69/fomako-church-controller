@@ -234,6 +234,18 @@ pub struct App {
     pub update_next_check: f64,
     pub update_slot: Arc<Mutex<Vec<UpdateEvent>>>,
     pub update_waker: Option<rune::Waker>,
+
+    // Cross-camera follow: leader aim → follower pan/tilt (src/follow.rs).
+    pub follow_on: bool,
+    pub follow_leader: usize,
+    pub follow_follower: usize,
+    pub follow_pan_offset: i32,
+    pub follow_tilt_offset: i32,
+    pub follow_status: String,
+    pub follow_ready: bool,
+    pub follow_gen: Arc<AtomicU64>,
+    pub follow_slot: Arc<Mutex<Option<crate::follow::FollowEvent>>>,
+    pub follow_waker: Option<rune::Waker>,
 }
 
 #[derive(Clone, Debug)]
@@ -265,6 +277,18 @@ pub struct ScanState {
 impl App {
     pub fn new() -> Self {
         let cameras = load_cameras();
+        let saved = crate::follow::load_saved();
+        let (follow_leader, follow_follower, follow_pan_offset, follow_tilt_offset, follow_ready) = match &saved {
+            Some(sv) if cameras.len() > 1 => {
+                let leader = cameras.iter().position(|c| c.ip == sv.leader_ip);
+                let follower = cameras.iter().position(|c| c.ip == sv.follower_ip);
+                match (leader, follower) {
+                    (Some(l), Some(f)) if l != f => (l, f, sv.pan_offset, sv.tilt_offset, true),
+                    _ => (0, 1, 0, 0, false),
+                }
+            }
+            _ => (0, if cameras.len() > 1 { 1 } else { 0 }, 0, 0, false),
+        };
         let mut s = App {
             cameras,
             selected: 0,
@@ -366,6 +390,16 @@ impl App {
             update_next_check: 4.0,
             update_slot: Arc::new(Mutex::new(Vec::new())),
             update_waker: None,
+            follow_on: false,
+            follow_leader,
+            follow_follower,
+            follow_pan_offset,
+            follow_tilt_offset,
+            follow_status: "Idle — calibrate both cameras on one landmark, then Start.".to_string(),
+            follow_ready,
+            follow_gen: Arc::new(AtomicU64::new(0)),
+            follow_slot: Arc::new(Mutex::new(None)),
+            follow_waker: None,
         };
         if s.cameras.is_empty() {
             s.cameras.push(CameraConfig::default());
@@ -508,6 +542,32 @@ impl App {
             }
         }
         changed
+    }
+
+    /// Drain follow-loop updates; call from AppSpec::poll. True when changed.
+    pub fn follow_poll(&mut self) -> bool {
+        let event = self.follow_slot.lock().ok().and_then(|mut s| s.take());
+        match event {
+            Some(crate::follow::FollowEvent::Status(msg)) => {
+                if self.follow_status == msg {
+                    false
+                } else {
+                    self.follow_status = msg;
+                    true
+                }
+            }
+            Some(crate::follow::FollowEvent::Error(msg)) => {
+                let text = format!("follow error — {}", msg);
+                if self.follow_status == text {
+                    false
+                } else {
+                    self.follow_status = text.clone();
+                    self.push_log(text);
+                    true
+                }
+            }
+            None => false,
+        }
     }
 
     #[cfg(test)]

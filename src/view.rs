@@ -321,6 +321,7 @@ fn control_page(s: &App, t: rune::tok::Theme, dark: bool, touch: bool) -> El {
     let bh = if touch { 44.0 } else { 32.0 };
     col().key("control").w_full().px(16.0).py(14.0).gap(14.0)
         .child(camera_switcher(s, t, touch))
+        .child(follow_card(s, t, dark, touch, bh))
         .child(preview_pane(s, t, touch))
         .child(tracking_card(s, t, dark, touch))
         .child(row().w_full().gap(14.0).flex_wrap()
@@ -425,6 +426,96 @@ fn tracking_card(s: &App, t: rune::tok::Theme, dark: bool, touch: bool) -> El {
              Only AI-tracking models answer this command — on older cameras it is ignored (Cameras → Test shows the reply)."
                 .to_owned())
             .w_full().wrap().font(type_::LABEL).color(t.text_secondary))
+}
+
+fn follow_card(s: &App, t: rune::tok::Theme, dark: bool, _touch: bool, bh: f32) -> El {
+    let names: Vec<String> = s.cameras.iter().map(|c| c.name.clone()).collect();
+    let mut card = col().key("follow").w_full().padding(12.0).radius(8.0)
+        .fill(t.card).border(1.0, t.card_border).gap(8.0)
+        .child(row().w_full().gap(8.0).center_y().flex_wrap()
+            .child(section_title(t, "Cross-camera AI follow"))
+            .child(text(s.follow_status.clone()).font(type_::LABEL).color(t.text_secondary).grow(1.0).min_w(120.0).wrap()))
+        .child(text("Point both cameras at the same landmark, Calibrate, then Start. The leader's built-in AI tracking drives the follower's pan/tilt over VISCA. Turn the follower's own AI tracking OFF so the two don't fight.".to_owned())
+            .w_full().wrap().font(type_::LABEL).color(t.text_secondary));
+
+    if names.len() < 2 {
+        return card.child(text("Add a second camera on the Cameras page to use follow.".to_owned())
+            .w_full().wrap().font(type_::LABEL).color(t.text_secondary));
+    }
+
+    let mut leader_row = row().key("follow-leader").w_full().gap(6.0).center_y().flex_wrap()
+        .child(text("Leader (AI tracking):".to_owned()).font(type_::LABEL).color(t.text_secondary));
+    for (i, name) in names.iter().enumerate() {
+        let on = i == s.follow_leader;
+        leader_row = leader_row.child(
+            el().key(format!("fl-{}", i)).h(bh).px(10.0).center().radius(6.0)
+                .fill(if on { tok::accent(0, dark) } else { t.card })
+                .border(1.0, t.card_border).hover(t.hover).press(t.press).focusable(true)
+                .role("button").label(format!("Set leader to {}", name))
+                .on_press(move |s: &mut App| {
+                    actions::follow_stop(s);
+                    s.follow_leader = i;
+                    if s.follow_follower == i {
+                        s.follow_follower = if i == 0 { 1 } else { 0 };
+                    }
+                    s.follow_ready = false;
+                    s.follow_status = format!("Leader: {}. Calibrate, then Start.", s.cameras[i].name);
+                })
+                .child(text(if on { format!("● {}", name) } else { name.clone() })
+                    .font(type_::BODY)
+                    .color(if on { rune::Color::WHITE } else { t.text })
+                    .a11y_hidden())
+        );
+    }
+
+    let mut follower_row = row().key("follow-follower").w_full().gap(6.0).center_y().flex_wrap()
+        .child(text("Follower:".to_owned()).font(type_::LABEL).color(t.text_secondary));
+    for (i, name) in names.iter().enumerate() {
+        let on = i == s.follow_follower;
+        follower_row = follower_row.child(
+            el().key(format!("ff-{}", i)).h(bh).px(10.0).center().radius(6.0)
+                .fill(if on { tok::accent(0, dark) } else { t.card })
+                .border(1.0, t.card_border).hover(t.hover).press(t.press).focusable(true)
+                .role("button").label(format!("Set follower to {}", name))
+                .on_press(move |s: &mut App| {
+                    actions::follow_stop(s);
+                    s.follow_follower = i;
+                    if s.follow_leader == i {
+                        s.follow_leader = if i == 0 { 1 } else { 0 };
+                    }
+                    s.follow_ready = false;
+                    s.follow_status = format!("Follower: {}. Calibrate, then Start.", s.cameras[i].name);
+                })
+                .child(text(if on { format!("● {}", name) } else { name.clone() })
+                    .font(type_::BODY)
+                    .color(if on { rune::Color::WHITE } else { t.text })
+                    .a11y_hidden())
+        );
+    }
+
+    card = card.child(leader_row).child(follower_row);
+    card = card.child(row().w_full().gap(8.0).center_y().flex_wrap()
+        .child(btn_flex("Calibrate", "Calibrate follow from a shared landmark", "follow-cal", t, 92.0, bh,
+            |s: &mut App| actions::follow_calibrate(s)))
+        .child(if s.follow_on {
+            btn_flex("Stop following", "Stop cross-camera follow", "follow-toggle", t, 108.0, bh,
+                |s: &mut App| actions::follow_toggle(s))
+        } else {
+            accent_btn_flex("Start following", "Start cross-camera follow", "follow-toggle", dark, 108.0, bh,
+                |s: &mut App| actions::follow_toggle(s))
+        })
+        .child(text(format!("offset pan {:+#} · tilt {:+#}", s.follow_pan_offset, s.follow_tilt_offset))
+            .font(type_::MONO_CAPTION).color(t.text_secondary)));
+    card.child(row().w_full().gap(6.0).center_y().flex_wrap()
+        .child(text("Nudge offset:".to_owned()).font(type_::LABEL).color(t.text_secondary))
+        .child(btn_flex("Pan −", "Nudge pan offset down", "follow-pan-minus", t, 64.0, bh,
+            |s: &mut App| actions::follow_adjust(s, -10, 0)))
+        .child(btn_flex("Pan +", "Nudge pan offset up", "follow-pan-plus", t, 64.0, bh,
+            |s: &mut App| actions::follow_adjust(s, 10, 0)))
+        .child(btn_flex("Tilt −", "Nudge tilt offset down", "follow-tilt-minus", t, 64.0, bh,
+            |s: &mut App| actions::follow_adjust(s, 0, -10)))
+        .child(btn_flex("Tilt +", "Nudge tilt offset up", "follow-tilt-plus", t, 64.0, bh,
+            |s: &mut App| actions::follow_adjust(s, 0, 10))))
 }
 
 fn camera_switcher(s: &App, t: rune::tok::Theme, touch: bool) -> El {
@@ -1079,6 +1170,8 @@ fn help_page(s: &App, t: rune::tok::Theme, _dark: bool, touch: bool) -> El {
             "On AI-tracking models (FMK/K600/K630 Gen 3 and similar) the Control page has a Tracking ON/OFF card. It sends 81 0A 01 32 00 00 02 00 FF for real-time tracking, …02 01 FF for area tracking and …03 00 FF to stop. While tracking is on the camera ignores pan/tilt, which is normal: press F4 on the IR remote (or click the person's box in the camera web page) to switch target. Area mode needs at least two areas configured in the web page. Older non-AI models reject the command — Cameras → Test shows the camera's answer."))
         .child(help_card(t, "7. Match a picture",
             "Picture Edit → Match a picture loads a reference photo and tunes the camera's image settings to match it: the app measures brightness, contrast, saturation, detail and warmth, then sends VISCA A1 (Brightness), A2 (Contrast), 49 (Saturation) and 42 (Sharpness). Colour matching optionally trims R/B Gain (43/44) in Manual WB. Match now = one pass; Auto match = repeat every ~2.5 s. This never moves the camera — it is separate from AI tracking."))
+        .child(help_card(t, "8. Cross-camera AI follow",
+            "Only Gen-3 AI models auto-track on their own. Enable AI tracking on the leader (remote F2 or the camera web page). Point both cameras at the same landmark, press Calibrate, then Start. The follower repeats the leader's pan/tilt aim. Turn the follower's own AI tracking OFF. Works while both cameras see the subject; it is an aim mapping, not shared subject coordinates — the cameras expose no tracking data over VISCA."))
         .child(help_card(t, "Manual",
             "FoMaKo NDI/SDI/HDMI PTZ User Manual V3.0 (PDF): https://fomako.net/uploads/20230817/fd1bfd181b89ae798bee1f7ed260a7b3.pdf — §§3 remote+menu, 4 network/streaming, 5 VISCA/Pelco lists. IR: * # 7 shows IP, # # # clears presets, * # 6 factory reset."))
         .child(hint_card(t, "Built with Rune (Rust GPU UI, anomalyco/rune). Runs on Windows / macOS / Linux. Config fomako-cameras.json sits beside the app — copy it to every booth PC."))

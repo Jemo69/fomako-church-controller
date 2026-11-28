@@ -15,6 +15,7 @@ Manual: [FoMaKo NDI/SDI/HDMI PTZ User Manual V3.0 (PDF)](https://fomako.net/uplo
 - **Picture Edit**: photo-style Brightness / Contrast / Saturation / Sharpness sliders (-100…+100) with **live simulated preview** (color bars + gray ramp). **Apply to Camera** sends VISCA A1/A2/49/42. This is the “make the picture look like I want” feature.
 - **Match a picture (image look)**: load a reference photo and the **app** measures it (brightness, contrast, saturation, detail, warmth) and tunes the camera’s picture settings to match — Brightness, Contrast, Saturation and Sharpness, plus optional colour via R/B Gain. **Match now** does one pass; **Auto match** keeps nudging about every 2.5 s while the preview runs. This changes image settings only: the camera’s position never moves. Separate from the camera’s own AI tracking below.
 - **Cameras page**: **auto-find** (subnet scan: TCP 5678 + UDP 52381 + HTTP sniff + ONVIF discovery, one-tap Add), add/remove, Select, Test (sends Stop + shows ACK), protocol toggle (Sony VISCA UDP :52381 recommended, or IP-VISCA TCP :5678), **per-camera login** (RTSP/web use it; VISCA needs none), saved to `fomako-cameras.json` beside the app (copy to every booth PC). Shows RTSP/RTMP/Web UI URLs for VLC/OBS/vMix.
+- **Cross-camera AI follow**: pick a leader and a follower, point both at one landmark, **Calibrate**, then **Start**. The leader's built-in AI tracking moves it; the follower repeats that pan/tilt aim over VISCA (absolute position + position inquiry). Both cameras then frame the same subject. The follower's own AI tracking must be off. This mirrors the leader's *aim* — FoMaKo cameras expose no subject coordinates or tracking status over VISCA, so a true shared-subject solve is not possible without a vision tracker. See [Cross-camera AI follow](#cross-camera-ai-follow).
 - **Android (Native APK — recommended for Android)**: standalone Jetpack Compose app (`android/`) powered by the Rust VISCA & LAN discovery engine via JNI (`src/android_jni.rs`). Connects **directly** over WiFi to FoMaKo cameras (Sony VISCA UDP `:52381`, IP-VISCA TCP `:5678`, ONVIF + subnet scan) and plays the **live RTSP preview at the camera's frame rate** (`/live/av1` via Android MediaPlayer), with an optional relay MJPEG stream when relay is on — **no PC or relay needed**. Build with `scripts/build-android.sh` → `dist/fomako-church-controller-android.apk`.
 - **Phones (iPhone / Android browser)**: open the web build in the phone browser (same WiFi). Because Android Chrome requires HTTPS for WebGPU on LAN IPs, pass `--https` to the LAN relay: `python3 scripts/visca-relay.py --port 8443 --https --serve-web dist/web`, then open the printed `https://<PC-LAN-IP>:8443/#relay=...&subnet=...&autostart=scan` URL (accept the self-signed cert prompt once; put the URL in a booth QR code). Rune has no native Android/iOS backend yet (`web → iOS → Android`), so the native Android app uses Jetpack Compose + Rust JNI while iOS uses the browser + relay path.
 - **Auto-updates**: at launch (and every 6 hours) the app asks GitHub for the newest release and puts **⬆ Update vX** in the title bar and an update card on the Help page. One click downloads this platform's binary, checks it against the release's `SHA256SUMS`, swaps it beside the running app and then asks before restarting — cameras and `fomako-cameras.json` are untouched, and the app never restarts while you're on air. `FOMAKO_NO_UPDATE_CHECK=1` turns the automatic check off; `FOMAKO_UPDATE_API=<url>` points it at a mirror.
@@ -45,6 +46,21 @@ FoMaKo's AI-tracking models (FMK/K600/K630 Gen 3 and similar) do the following i
 - Tracking OFF — `81 0A 01 32 00 00 03 00 FF`
 
 Real-time mode follows one person; press **F4** on the IR remote (or click their box in the camera's web page) to switch target. Area mode follows movement inside up to four areas, which are configured in the camera web page first (at least two). While tracking is on the camera ignores pan/tilt — the app's status line says so, and **Tracking OFF** hands control back. Non-AI models reject the command; `Cameras → Test` shows the camera's answer.
+
+### Cross-camera AI follow
+
+FoMaKo Gen-3 models (K20/K30/K600N/K800N, FMK/NDI `AI` models) auto-track a person inside the camera. Cross-camera subject sharing is **not** available on the hardware. The app can switch the camera's tracking on and off (§5.2, `8x 0A 01 32 …`), but the camera publishes no subject coordinates and no tracking-status query. There is nothing for camera 2 to receive except pan/tilt.
+
+This app therefore mirrors the leader's aim instead of sharing the subject:
+
+1. Turn tracking ON for the leader with the Control page card, its remote (`F2`), or its web page.
+2. Turn the follower's own AI tracking **off**, or the two controllers fight.
+3. Point both cameras at the same landmark and press **Calibrate** — the app reads both pan/tilt positions and stores the offset (`fomako-follow.json`).
+4. Press **Start** on the Control page. The app polls the leader's `8x 09 06 12 FF` position ~8×/s and sends the follower `8x 01 06 02 …`.
+
+Use **Pan/Tilt −/+** offsets to fine-tune the framing without moving the leader. Works best with both cameras near each other, a distant subject, and similar zoom. Parallax grows with baseline and zoom, and the follower only sees what the leader sees — it does not re-acquire the subject after a cut or a complete occlusion.
+
+A true shared-subject tracker would need frames from both cameras, a person detector/ReID model and a control loop in this app. That is the next step, not something the cameras can do themselves.
 
 ### Live preview + camera passwords
 

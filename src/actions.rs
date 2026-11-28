@@ -4,6 +4,9 @@ use std::sync::{Arc, Mutex};
 use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 
 use crate::discover::{self, ScanEvent, ScanHandle};
+use crate::follow::{self, FollowSaved};
+#[cfg(not(target_arch = "wasm32"))]
+use crate::follow::FollowSpec;
 use crate::model::{App, ScanState};
 #[cfg(target_arch = "wasm32")]
 use crate::model::ActionReply;
@@ -574,6 +577,136 @@ pub fn poll_look(app: &mut App, clock: f64) -> bool {
     }
     match_look(app);
     true
+}
+
+// ---------------------------------------------------------------- cross-camera follow
+
+fn follow_pair(app: &App) -> Option<(usize, usize)> {
+    if app.cameras.len() < 2 {
+        return None;
+    }
+    let l = app.follow_leader.min(app.cameras.len() - 1);
+    let f = app.follow_follower.min(app.cameras.len() - 1);
+    (l != f).then_some((l, f))
+}
+
+fn save_follow(app: &App) {
+    let Some((l, f)) = follow_pair(app) else {
+        return;
+    };
+    follow::save(&FollowSaved {
+        leader_ip: app.cameras[l].ip.clone(),
+        follower_ip: app.cameras[f].ip.clone(),
+        pan_offset: app.follow_pan_offset,
+        tilt_offset: app.follow_tilt_offset,
+    });
+}
+
+pub fn follow_stop(app: &mut App) {
+    app.follow_gen.fetch_add(1, Ordering::SeqCst);
+    if app.follow_on {
+        app.follow_status = "Stopped — leader aim is no longer sent to the follower.".to_string();
+    }
+    app.follow_on = false;
+}
+
+pub fn follow_toggle(app: &mut App) {
+    if app.follow_on {
+        follow_stop(app);
+    } else {
+        follow_start(app);
+    }
+}
+
+fn follow_start(app: &mut App) {
+    let Some((l, f)) = follow_pair(app) else {
+        app.follow_status = "Add a second camera (and pick two different ones) first.".to_string();
+        return;
+    };
+    if !app.follow_ready {
+        app.follow_status =
+            "Calibrate both cameras on one shared landmark first (Start uses the saved offset).".to_string();
+        return;
+    }
+    #[cfg(target_arch = "wasm32")]
+    {
+        let _ = (l, f);
+        app.follow_status = "Cross-camera follow needs the desktop app (camera sockets).".to_string();
+        return;
+    }
+    #[cfg(not(target_arch = "wasm32"))]
+    {
+        let leader = app.cameras[l].clone();
+        let follower = app.cameras[f].clone();
+        let spec = FollowSpec {
+            leader: leader.clone(),
+            follower: follower.clone(),
+            pan_offset: app.follow_pan_offset,
+            tilt_offset: app.follow_tilt_offset,
+            pan_speed: app.pan_speed,
+            tilt_speed: app.tilt_speed,
+        };
+        app.follow_gen.fetch_add(1, Ordering::SeqCst);
+        let gen = app.follow_gen.load(Ordering::SeqCst);
+        follow::start(
+            spec,
+            gen,
+            app.follow_gen.clone(),
+            app.follow_slot.clone(),
+            app.follow_waker.clone(),
+        );
+        app.follow_on = true;
+        app.follow_status = format!(
+            "Following — {} drives {} (pan {:+#}, tilt {:+#}).",
+            leader.name, follower.name, app.follow_pan_offset, app.follow_tilt_offset
+        );
+        save_follow(app);
+    }
+}
+
+/// Point both cameras at one landmark first, then calibrate.
+pub fn follow_calibrate(app: &mut App) {
+    follow_stop(app);
+    let Some((l, f)) = follow_pair(app) else {
+        app.follow_status = "Add a second camera (and pick two different ones) first.".to_string();
+        return;
+    };
+    let leader = app.cameras[l].clone();
+    let follower = app.cameras[f].clone();
+    match follow::calibrate(&leader, &follower) {
+        Ok((pan, tilt)) => {
+            app.follow_pan_offset = pan;
+            app.follow_tilt_offset = tilt;
+            app.follow_ready = true;
+            app.follow_status = format!(
+                "Calibrated — {} → {} offset pan {:+#}, tilt {:+#}. Start when ready.",
+                leader.name, follower.name, pan, tilt
+            );
+            app.push_log(format!("Follow calibrated: {} -> {} pan {:+} tilt {:+}", leader.name, follower.name, pan, tilt));
+            save_follow(app);
+        }
+        Err(error) => {
+            app.follow_status = format!("Calibration failed — {}", error);
+            app.push_log(format!("Follow calibration failed: {}", error));
+        }
+    }
+}
+
+pub fn follow_adjust(app: &mut App, pan_delta: i32, tilt_delta: i32) {
+    let was_running = app.follow_on;
+    app.follow_pan_offset = (app.follow_pan_offset + pan_delta).clamp(-follow::POS_MAX, follow::POS_MAX);
+    app.follow_tilt_offset = (app.follow_tilt_offset + tilt_delta).clamp(-follow::POS_MAX, follow::POS_MAX);
+    if app.follow_ready && was_running && app.cameras.len() > 1 {
+        // Restart the loop so the new offset takes effect now.
+        follow_stop(app);
+        follow_start(app);
+    } else {
+        app.follow_status = format!(
+            "Offset pan {:+#}, tilt {:+#} — fine-tune while following.",
+            app.follow_pan_offset, app.follow_tilt_offset
+        );
+        save_follow(app);
+    }
 }
 
 #[cfg(target_arch = "wasm32")]

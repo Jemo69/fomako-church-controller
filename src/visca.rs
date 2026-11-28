@@ -91,6 +91,50 @@ pub fn pan_tilt_reset(address: u8) -> Vec<u8> {
     vec![addr_byte(address), 0x01, 0x06, 0x05, 0xFF]
 }
 
+/// Absolute pan/tilt (manual §5.2): `8x 01 06 02 VV WW 0Y 0Y 0Y 0Y 0Z 0Z 0Z 0Z FF`.
+/// Pan and tilt are 16-bit positions as returned by `pan_tilt_pos_inq`.
+pub fn pan_tilt_absolute(address: u8, pan_speed: u8, tilt_speed: u8, pan: u16, tilt: u16) -> Vec<u8> {
+    let a = addr_byte(address);
+    let vv = pan_speed.clamp(0x01, 0x18);
+    let ww = tilt_speed.clamp(0x01, 0x14);
+    let mut out = vec![a, 0x01, 0x06, 0x02, vv, ww];
+    for shift in [12, 8, 4, 0] {
+        out.push(((pan >> shift) & 0x0F) as u8);
+    }
+    for shift in [12, 8, 4, 0] {
+        out.push(((tilt >> shift) & 0x0F) as u8);
+    }
+    out.push(0xFF);
+    out
+}
+
+/// Pan/tilt position inquiry (manual §5.3): `8x 09 06 12 FF`.
+pub fn pan_tilt_pos_inq(address: u8) -> Vec<u8> {
+    vec![addr_byte(address), 0x09, 0x06, 0x12, 0xFF]
+}
+
+/// Parse a pan/tilt position reply, with or without the Sony 8-byte header.
+/// Response: `y0 50 0w 0w 0w 0w 0z 0z 0z 0z FF`.
+pub fn parse_pan_tilt_pos(reply: &[u8]) -> Option<(u16, u16)> {
+    let payload = if reply.len() >= 8 && reply[..2] == [0x01, 0x00] {
+        &reply[8..]
+    } else {
+        reply
+    };
+    if payload.len() < 10 || payload[1] != 0x50 {
+        return None;
+    }
+    let mut pan = 0u16;
+    for &b in &payload[2..6] {
+        pan = (pan << 4) | (b & 0x0F) as u16;
+    }
+    let mut tilt = 0u16;
+    for &b in &payload[6..10] {
+        tilt = (tilt << 4) | (b & 0x0F) as u16;
+    }
+    Some((pan, tilt))
+}
+
 pub fn zoom_stop(address: u8) -> Vec<u8> {
     vec![addr_byte(address), 0x01, 0x04, 0x07, 0x00, 0xFF]
 }
@@ -406,6 +450,130 @@ pub fn send_blocking(ip: &str, port: u16, protocol: Protocol, payload: &[u8]) ->
     }
 }
 
+/// Fire a command without waiting for ACK/completion. Used by the follow loop,
+/// where a camera's `90 41` ACK must not be mistaken for a rejection.
+pub fn send_only(ip: &str, port: u16, protocol: Protocol, payload: &[u8]) -> Result<(), String> {
+    match protocol {
+        Protocol::SonyUdp => {
+            let seq = SEQ.fetch_add(1, Ordering::SeqCst);
+            let packet = sony_encapsulate(payload, seq);
+            let local = if ip.contains(':') { "[::]:0" } else { "0.0.0.0:0" };
+            let sock = UdpSocket::bind(local).map_err(|e| format!("udp bind: {e}"))?;
+            sock.set_write_timeout(Some(Duration::from_millis(800)))
+                .map_err(|e| format!("timeout: {e}"))?;
+            let target = format!("{}:{}", ip, port);
+            sock.send_to(&packet, &target)
+                .map_err(|e| format!("send {}: {e}", target))?;
+            Ok(())
+        }
+        Protocol::IpViscaTcp => {
+            use std::io::Write;
+            let target = format!("{}:{}", ip, port);
+            let mut stream = TcpStream::connect_timeout(
+                &target.to_socket_addrs_one()?,
+                Duration::from_millis(1200),
+            )
+            .map_err(|e| format!("tcp {}: {e}", target))?;
+            stream
+                .set_write_timeout(Some(Duration::from_millis(800)))
+                .map_err(|e| format!("timeout: {e}"))?;
+            stream
+                .write_all(payload)
+                .map_err(|e| format!("write: {e}"))?;
+            Ok(())
+        }
+    }
+}
+
+/// Send an inquiry and return its first position/completion reply payload.
+pub fn query_blocking(ip: &str, port: u16, protocol: Protocol, payload: &[u8]) -> Result<Vec<u8>, String> {
+    match protocol {
+        Protocol::SonyUdp => {
+            let seq = SEQ.fetch_add(1, Ordering::SeqCst);
+            let packet = sony_encapsulate(payload, seq);
+            let local = if ip.contains(':') { "[::]:0" } else { "0.0.0.0:0" };
+            let sock = UdpSocket::bind(local).map_err(|e| format!("udp bind: {e}"))?;
+            sock.set_read_timeout(Some(Duration::from_millis(250)))
+                .map_err(|e| format!("timeout: {e}"))?;
+            sock.set_write_timeout(Some(Duration::from_millis(800)))
+                .map_err(|e| format!("timeout: {e}"))?;
+            let target = format!("{}:{}", ip, port);
+            sock.send_to(&packet, &target)
+                .map_err(|e| format!("send {}: {e}", target))?;
+            let mut buf = [0u8; 128];
+            for _ in 0..6 {
+                match sock.recv_from(&mut buf) {
+                    Ok((n, _)) => {
+                        let reply = &buf[..n];
+                        let body = if reply.len() >= 8 && reply[..2] == [0x01, 0x00] {
+                            &reply[8..]
+                        } else {
+                            reply
+                        };
+                        if body.len() >= 2 && body[0] == 0x90 && body[1] == 0x50 {
+                            return Ok(reply.to_vec());
+                        }
+                        // 90 41 is ACK; keep reading for the 90 50 reply.
+                    }
+                    Err(_) => break,
+                }
+            }
+            Err("no reply (camera did not answer the position inquiry)".to_string())
+        }
+        Protocol::IpViscaTcp => {
+            use std::io::{Read, Write};
+            let target = format!("{}:{}", ip, port);
+            let mut stream = TcpStream::connect_timeout(
+                &target.to_socket_addrs_one()?,
+                Duration::from_millis(1200),
+            )
+            .map_err(|e| format!("tcp {}: {e}", target))?;
+            stream
+                .set_read_timeout(Some(Duration::from_millis(600)))
+                .map_err(|e| format!("timeout: {e}"))?;
+            stream
+                .set_write_timeout(Some(Duration::from_millis(800)))
+                .map_err(|e| format!("timeout: {e}"))?;
+            stream
+                .write_all(payload)
+                .map_err(|e| format!("write: {e}"))?;
+            let mut reply = Vec::new();
+            let mut buf = [0u8; 128];
+            while reply.len() < 64 {
+                match stream.read(&mut buf) {
+                    Ok(0) => break,
+                    Ok(n) => {
+                        reply.extend_from_slice(&buf[..n]);
+                        if reply.contains(&0xFF) {
+                            return Ok(reply);
+                        }
+                    }
+                    Err(_) => break,
+                }
+            }
+            if reply.is_empty() {
+                Err("no reply (camera did not answer the position inquiry)".to_string())
+            } else {
+                Ok(reply)
+            }
+        }
+    }
+}
+
+trait ToOneSocketAddr {
+    fn to_socket_addrs_one(&self) -> Result<std::net::SocketAddr, String>;
+}
+
+impl ToOneSocketAddr for str {
+    fn to_socket_addrs_one(&self) -> Result<std::net::SocketAddr, String> {
+        use std::net::ToSocketAddrs;
+        self.to_socket_addrs()
+            .map_err(|e| format!("bad address {}: {}", self, e))?
+            .next()
+            .ok_or_else(|| format!("bad address {}", self))
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -441,6 +609,48 @@ mod tests {
             named_command("tracking", 1, 1, 1, 0),
             Some(vec![0x81, 0x0A, 0x01, 0x32, 0x00, 0x00, 0x02, 0x01, 0xFF])
         );
+    }
+
+    #[test]
+    fn absolute_position_and_inquiry_match_the_manual() {
+        assert_eq!(
+            pan_tilt_absolute(1, 12, 0x20, 0x1234, 0x0ABC),
+            vec![
+                0x81, 0x01, 0x06, 0x02, 12, 0x14, // speeds clamp to pan 24 / tilt 20
+                0x01, 0x02, 0x03, 0x04, 0x00, 0x0A, 0x0B, 0x0C, 0xFF
+            ]
+        );
+        assert_eq!(pan_tilt_pos_inq(2), vec![0x82, 0x09, 0x06, 0x12, 0xFF]);
+    }
+
+    #[test]
+    fn parses_position_replies_with_and_without_sony_header() {
+        let raw = [0x90, 0x50, 0x01, 0x02, 0x03, 0x04, 0x00, 0x0A, 0x0B, 0x0C, 0xFF];
+        assert_eq!(parse_pan_tilt_pos(&raw), Some((0x1234, 0x0ABC)));
+        let mut framed = sony_encapsulate(&raw, 7);
+        assert_eq!(parse_pan_tilt_pos(&framed), Some((0x1234, 0x0ABC)));
+        framed[9] = 0x41;
+        assert_eq!(parse_pan_tilt_pos(&framed), None);
+    }
+
+    #[test]
+    fn inquiry_reads_past_ack_to_position_reply() {
+        let camera = UdpSocket::bind("127.0.0.1:0").expect("bind fake camera");
+        let port = camera.local_addr().unwrap().port();
+        std::thread::spawn(move || {
+            let mut packet = [0u8; 128];
+            let (_, source) = camera.recv_from(&mut packet).expect("receive inquiry");
+            let ack = sony_encapsulate(&[0x90, 0x41, 0xFF], 1);
+            let reply = sony_encapsulate(
+                &[0x90, 0x50, 0x01, 0x02, 0x03, 0x04, 0x00, 0x0A, 0x0B, 0x0C, 0xFF],
+                2,
+            );
+            camera.send_to(&ack, source).unwrap();
+            camera.send_to(&reply, source).unwrap();
+        });
+        let bytes = query_blocking("127.0.0.1", port, Protocol::SonyUdp, &pan_tilt_pos_inq(1))
+            .expect("position reply");
+        assert_eq!(parse_pan_tilt_pos(&bytes), Some((0x1234, 0x0ABC)));
     }
 
     #[test]
